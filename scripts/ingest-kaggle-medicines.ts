@@ -114,11 +114,11 @@ function selectRepresentativeItems(
 
 /**
  * Ingests Kaggle Indian outpatient catalog, applies strict clinical normalization,
- * groups by composition_key, and selects ~750 top outpatient records.
+ * groups by composition_key, and selects ~1800 top outpatient records.
  */
 export async function ingestKaggleMedicinesDryRun(
   csvPath: string = DEFAULT_CSV_PATH,
-  targetCount: number = 750
+  targetCount: number = 1800
 ): Promise<{
   totalCsvRows: number;
   validOutpatientRows: number;
@@ -249,8 +249,8 @@ export async function ingestKaggleMedicinesDryRun(
   const selectedRecords: MedicineRecord[] = [];
   let ntiSelectedCount = 0;
 
-  // 1. Include representative brands across top NTI groups
-  for (const ntiGroup of ntiGroups.slice(0, 45)) {
+  // 1. Include representative brands across all NTI groups
+  for (const ntiGroup of ntiGroups) {
     const picks = selectRepresentativeItems(
       ntiGroup.items,
       Math.min(3, ntiGroup.items.length)
@@ -483,7 +483,7 @@ async function main() {
   console.log("⏳ Streaming and selecting representative outpatient records...\n");
 
   const startTime = Date.now();
-  const dryRunResult = await ingestKaggleMedicinesDryRun(csvPath, 750);
+  const dryRunResult = await ingestKaggleMedicinesDryRun(csvPath, 1800);
 
   // Generate Jan Aushadhi generic counterparts
   const janAushadhiGenerics = generateJanAushadhiGenerics(
