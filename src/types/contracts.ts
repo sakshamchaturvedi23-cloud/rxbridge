@@ -25,6 +25,20 @@ export type ReservationItemStatus =
   | "substitute_approved"
   | "substitute_rejected";
 
+export type MedicineMatchStatus =
+  | "exact"
+  | "alias"
+  | "auto_matched"     // >= 90% similarity se auto-replace hua
+  | "needs_selection"  // < 90% similarity -> UI dropdown options dikhayega
+  | "manual_required"; // koi close match nahi -> user khud enter karega
+
+export interface MedicineSuggestion {
+  medicine_id: string;
+  brand_name: string;
+  composition_display: string;
+  similarity: number; // e.g., 0.85 means 85% match
+}
+
 // =========================================================
 // CONTRACT 1: P1 -> P2 (/api/extract & /api/safety)
 // =========================================================
@@ -56,6 +70,8 @@ export interface ExtractedMedicineItem {
   is_schedule_h: boolean;      // true => requires Rx / pharmacist verification
   allow_alternative: boolean;  // "Alternative chalega" vs "Sirf yahi brand"
   safety_flags: SafetyFlag[];  // empty [] in Phase 1, populated in Phase 2
+  match_status?: MedicineMatchStatus;
+  suggestions?: MedicineSuggestion[];
 }
 
 export interface ExtractResponse {
@@ -67,6 +83,34 @@ export interface ExtractResponse {
     patient_name_match: boolean | null;
     is_duplicate: boolean;
   };
+}
+
+export interface ConfirmedMedicine {
+  medicine_id: string;
+  brand_name: string;
+  composition_key: string;
+  strength: string | null;
+  dosage: string | null;
+  mrp: number;
+  selected_alternative_id: string | null;
+  selected_alternative_brand_name?: string | null;
+  selected_alternative_mrp?: number | null;
+  is_nti: boolean;
+  is_schedule_h?: boolean;
+}
+
+/**
+ * Transforms confirmed review medicines into downstream P3 PlanRequest items.
+ */
+export function confirmedMedicinesToPlanItems(
+  medicines: ConfirmedMedicine[]
+): PlanRequest["items"] {
+  return medicines.map((m) => ({
+    medicine_id: m.selected_alternative_id || m.medicine_id,
+    composition_key: m.composition_key,
+    allow_alternative: !m.is_nti && Boolean(m.selected_alternative_id),
+    is_nti: m.is_nti,
+  }));
 }
 
 // =========================================================
