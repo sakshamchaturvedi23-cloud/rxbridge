@@ -40,3 +40,12 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 data/
+
+# temp exports & working CSVs
+supabase_medicines_full.csv
+supabase_medicines_full.json
+jan_aushadhi_core.csv
+jan_aushadhi_core_2.csv
+
+# allow final_medicine.csv while keeping raw/large datasets ignored
+!data/final_medicine.csv

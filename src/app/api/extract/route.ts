@@ -5,10 +5,13 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { buildCompositionKey } from "@/lib/clinical/normalize";
 import { isNtiComposition, isScheduleHComposition } from "@/lib/clinical/nti-list";
 import { findDemoPrescriptionCache, toDemoExtractResponse } from "@/lib/clinical/demo-cache";
+import { findFuzzyMedicineMatches, type CandidateMedicine } from "@/lib/clinical/fuzzy-match";
 import type {
   ConfidenceLevel,
   ExtractResponse,
   ExtractedMedicineItem,
+  MedicineMatchStatus,
+  MedicineSuggestion,
   SafetyFlag,
 } from "@/types/contracts";
 import type { Json } from "@/types/database.types";
@@ -278,37 +281,68 @@ Return a valid JSON object matching this schema:
 }
 Do not hallucinate medicines that are not clearly visible. Always output pure JSON.`;
 
-  let completion: OpenAI.Chat.Completions.ChatCompletion;
-  try {
-    completion = await openai.chat.completions.create({
-      model: process.env.VISION_LLM_MODEL || "auto:rxbridge-vision",
-      messages: [
+  const primaryModel = process.env.VISION_LLM_MODEL?.trim();
+  const defaultBackupChain = [
+    "gemini-3.1-flash-lite-preview",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite",
+  ];
+
+  const envList = process.env.VISION_LLM_MODELS
+    ? process.env.VISION_LLM_MODELS.split(",").map((m) => m.trim()).filter(Boolean)
+    : [];
+
+  const candidateModels =
+    envList.length > 0
+      ? Array.from(new Set(envList))
+      : Array.from(new Set([...(primaryModel ? [primaryModel] : []), ...defaultBackupChain]));
+
+  let completion: OpenAI.Chat.Completions.ChatCompletion | null = null;
+  const attemptErrors: string[] = [];
+
+  for (const candidateModel of candidateModels) {
+    try {
+      completion = await openai.chat.completions.create(
         {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: [
+          model: candidateModel,
+          messages: [
             {
-              type: "text",
-              text: "Extract all prescribed medicines, strengths, dosage instructions, prescription date, and patient name as structured JSON.",
+              role: "system",
+              content: systemPrompt,
             },
             {
-              type: "image_url",
-              image_url: {
-                url: dataUrl,
-              },
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Extract all prescribed medicines, strengths, dosage instructions, prescription date, and patient name as structured JSON.",
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: dataUrl,
+                  },
+                },
+              ],
             },
           ],
+          response_format: { type: "json_object" },
         },
-      ],
-      response_format: { type: "json_object" },
-    });
-  } catch (llmError) {
-    const errorMsg = llmError instanceof Error ? llmError.message : "Unknown LLM error";
+        { timeout: 15000 }
+      );
+      break;
+    } catch (llmError) {
+      const errorMsg = llmError instanceof Error ? llmError.message : "Unknown LLM error";
+      attemptErrors.push(`${candidateModel}: ${errorMsg}`);
+    }
+  }
+  if (!completion) {
     return NextResponse.json(
-      { error: `Vision LLM extraction failed: ${errorMsg}` },
+      {
+        error: "Vision OCR extraction failed across all fallback models",
+        details: attemptErrors,
+      },
       { status: 502 }
     );
   }
@@ -338,7 +372,35 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
   const dateValid = checkDateValid(ocrData.prescription_date);
   const patientNameMatch = checkPatientNameMatch(userFullName, ocrData.patient_name);
 
-  // Process medicines and match against database / aliases / clinical rules
+  // Lazy catalog cache outside the item loop: loaded at most once if needed
+  let catalogCache: CandidateMedicine[] | null = null;
+ async function getCatalogForFuzzy(): Promise<CandidateMedicine[]> {
+    if (catalogCache !== null) return catalogCache;
+
+    const all: CandidateMedicine[] = [];
+    const pageSize = 1000;
+
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await supabase
+        .from("medicines")
+        .select("id, brand_name, composition_display, composition_key, is_nti, is_schedule_h")
+        .range(from, from + pageSize - 1);
+
+      if (error) {
+        console.warn("⚠️ Failed to load medicines catalog for fuzzy match:", error.message);
+        break;
+      }
+
+      if (!data || data.length === 0) break;
+      all.push(...(data as CandidateMedicine[]));
+      if (data.length < pageSize) break;
+    }
+
+    catalogCache = all;
+    return catalogCache;
+  }
+
+  // Process medicines and match against database / aliases / fuzzy matcher / clinical rules
   const items: ExtractedMedicineItem[] = [];
 
   for (let i = 0; i < ocrData.medicines.length; i++) {
@@ -350,13 +412,26 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
     let compositionKey = buildCompositionKey(compositionDisplay);
     let isNti = isNtiComposition(compositionDisplay);
     let isScheduleH = isScheduleHComposition(compositionDisplay);
+    let matchStatus: MedicineMatchStatus = "manual_required";
+    let suggestions: MedicineSuggestion[] = [];
 
-    // 1. Check ocr_aliases for verified patient corrections
-    const { data: alias } = await supabase
+    // 1. Check ocr_aliases for verified patient corrections (case-insensitive)
+    let { data: alias } = await supabase
       .from("ocr_aliases")
       .select("matched_medicine_id, medicines(*)")
-      .eq("raw_text", rawText)
+      .ilike("raw_text", rawText)
+      .limit(1)
       .maybeSingle();
+
+    if (!alias?.medicines && medItem.raw_name && medItem.raw_name.trim() !== rawText) {
+      const { data: nameOnlyAlias } = await supabase
+        .from("ocr_aliases")
+        .select("matched_medicine_id, medicines(*)")
+        .ilike("raw_text", medItem.raw_name.trim())
+        .limit(1)
+        .maybeSingle();
+      alias = nameOnlyAlias;
+    }
 
     if (alias?.medicines) {
       const dbMed = alias.medicines as {
@@ -371,8 +446,10 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
       brandName = dbMed.brand_name;
       compositionDisplay = dbMed.composition_display;
       compositionKey = dbMed.composition_key;
-      isNti = dbMed.is_nti;
-      isScheduleH = dbMed.is_schedule_h;
+      isNti = dbMed.is_nti || isNtiComposition(dbMed.composition_display || dbMed.brand_name);
+      isScheduleH =
+        dbMed.is_schedule_h || isScheduleHComposition(dbMed.composition_display || dbMed.brand_name);
+      matchStatus = "alias";
     } else {
       // 2. Query medicines catalog by brand_name
       const cleanBrandQuery = medItem.raw_name.replace(/[^a-zA-Z0-9\s-]/g, " ").trim();
@@ -400,8 +477,28 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
         brandName = dbMed.brand_name;
         compositionDisplay = dbMed.composition_display;
         compositionKey = dbMed.composition_key;
-        isNti = dbMed.is_nti;
-        isScheduleH = dbMed.is_schedule_h;
+        isNti = dbMed.is_nti || isNtiComposition(dbMed.composition_display || dbMed.brand_name);
+        isScheduleH =
+          dbMed.is_schedule_h || isScheduleHComposition(dbMed.composition_display || dbMed.brand_name);
+        matchStatus = "exact";
+      } else {
+        // 3. Lazy-loaded fuzzy fallback (>= 90% auto-match, < 90% dropdown suggestions)
+        const catalog = await getCatalogForFuzzy();
+        const fuzzyResult = findFuzzyMedicineMatches(rawText || medItem.raw_name, catalog);
+        suggestions = fuzzyResult.suggestions;
+        matchStatus = fuzzyResult.status;
+
+        if (fuzzyResult.status === "auto_matched" && fuzzyResult.matchedMedicine) {
+          const fuzzyMed = fuzzyResult.matchedMedicine;
+          matchedMedId = fuzzyMed.id;
+          brandName = fuzzyMed.brand_name;
+          compositionDisplay = fuzzyMed.composition_display;
+          compositionKey = fuzzyMed.composition_key || buildCompositionKey(fuzzyMed.composition_display);
+          isNti = fuzzyMed.is_nti || isNtiComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
+          isScheduleH =
+            fuzzyMed.is_schedule_h ||
+            isScheduleHComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
+        }
       }
     }
 
@@ -440,6 +537,8 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
       is_schedule_h: isScheduleH,
       allow_alternative: allowAlternative,
       safety_flags: safetyFlags,
+      match_status: matchStatus,
+      suggestions,
     });
   }
 
