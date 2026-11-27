@@ -5,7 +5,17 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { buildCompositionKey } from "@/lib/clinical/normalize";
 import { isNtiComposition, isScheduleHComposition } from "@/lib/clinical/nti-list";
 import { findDemoPrescriptionCache, toDemoExtractResponse } from "@/lib/clinical/demo-cache";
-import { findFuzzyMedicineMatches, type CandidateMedicine } from "@/lib/clinical/fuzzy-match";
+import {
+  findFuzzyMedicineMatches,
+  stripDosageFormPrefixes,
+  type CandidateMedicine,
+} from "@/lib/clinical/fuzzy-match";
+import {
+  buildAliasLookupMap,
+  extractBrandSearchCandidates,
+  resolveDemoItemsWithCatalog,
+  selectBestPrefixMatch,
+} from "@/lib/clinical/ocr-matching";
 import { evaluatePrescriptionSafety } from "@/lib/clinical/safety-check";
 import type {
   ConfidenceLevel,
@@ -173,9 +183,37 @@ export async function POST(request: NextRequest) {
     const patientNameMatch = checkPatientNameMatch(userFullName, matchedDemo.patient_name);
     const dateValid = checkDateValid(matchedDemo.prescription_date) ?? matchedDemo.trust_checks.date_valid;
 
+    // Resolve demo items against catalog medicines when available (preserves offline fallback if unavailable)
+    let resolvedDemoSeedItems: ExtractedMedicineItem[] = [...matchedDemo.items];
+    try {
+      const demoQueries = matchedDemo.items
+        .map((it) => extractBrandSearchCandidates(it.brand_name).prefixToken)
+        .filter((t): t is string => Boolean(t));
+
+      if (demoQueries.length > 0) {
+        const orFilter = Array.from(new Set(demoQueries))
+          .map((t) => `brand_name.ilike.${t}%`)
+          .join(",");
+        const { data: demoCatalogHits } = await supabase
+          .from("medicines")
+          .select("id, brand_name, composition_display, composition_key, is_nti, is_schedule_h")
+          .or(orFilter)
+          .limit(100);
+
+        if (demoCatalogHits && demoCatalogHits.length > 0) {
+          resolvedDemoSeedItems = resolveDemoItemsWithCatalog(
+            resolvedDemoSeedItems,
+            demoCatalogHits as CandidateMedicine[]
+          );
+        }
+      }
+    } catch (demoResolveErr) {
+      console.warn("⚠️ Demo catalog hydration skipped (offline fallback):", demoResolveErr);
+    }
+
     // Evaluate clinical safety (NTI lock, Schedule H, allergies, chronic conditions, interactions)
     const demoSafetyReport = evaluatePrescriptionSafety(
-      matchedDemo.items.map((item) => ({
+      resolvedDemoSeedItems.map((item) => ({
         temp_id: item.temp_id,
         medicine_id: item.matched_medicine_id,
         brand_name: item.brand_name,
@@ -188,7 +226,7 @@ export async function POST(request: NextRequest) {
     );
 
     // Ensure all NTI items strictly keep allow_alternative: false
-    const demoItems: ExtractedMedicineItem[] = matchedDemo.items.map((item, idx) => {
+    const demoItems: ExtractedMedicineItem[] = resolvedDemoSeedItems.map((item, idx) => {
       const safetyEval = demoSafetyReport.items[idx];
       const isNti = Boolean(safetyEval?.is_nti || item.is_nti);
       return {
@@ -394,9 +432,9 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
   const dateValid = checkDateValid(ocrData.prescription_date);
   const patientNameMatch = checkPatientNameMatch(userFullName, ocrData.patient_name);
 
-  // Lazy catalog cache outside the item loop: loaded at most once if needed
+  // Lazy catalog & alias caches outside the item loop: loaded at most once if needed
   let catalogCache: CandidateMedicine[] | null = null;
- async function getCatalogForFuzzy(): Promise<CandidateMedicine[]> {
+  async function getCatalogForFuzzy(): Promise<CandidateMedicine[]> {
     if (catalogCache !== null) return catalogCache;
 
     const all: CandidateMedicine[] = [];
@@ -422,6 +460,34 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
     return catalogCache;
   }
 
+  let aliasLookupCache: Record<string, string> | null = null;
+  async function getAliasLookupMap(): Promise<Record<string, string>> {
+    if (aliasLookupCache !== null) return aliasLookupCache;
+
+    const rows: Array<{ raw_text: string; brand_name?: string | null }> = [];
+    const pageSize = 1000;
+    for (let from = 0; from < 10000; from += pageSize) {
+      const { data, error } = await supabase
+        .from("ocr_aliases")
+        .select("raw_text, medicines(brand_name)")
+        .range(from, from + pageSize - 1);
+
+      if (error) {
+        console.warn("⚠️ Failed to load ocr_aliases for normalized lookup:", error.message);
+        break;
+      }
+      if (!data || data.length === 0) break;
+      for (const row of data) {
+        const medObj = row.medicines as { brand_name?: string } | null;
+        rows.push({ raw_text: row.raw_text, brand_name: medObj?.brand_name ?? null });
+      }
+      if (data.length < pageSize) break;
+    }
+
+    aliasLookupCache = buildAliasLookupMap(rows);
+    return aliasLookupCache;
+  }
+
   // Process medicines and match against database / aliases / fuzzy matcher / clinical rules
   const items: ExtractedMedicineItem[] = [];
 
@@ -437,22 +503,34 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
     let matchStatus: MedicineMatchStatus = "manual_required";
     let suggestions: MedicineSuggestion[] = [];
 
-    // 1. Check ocr_aliases for verified patient corrections (case-insensitive)
-    let { data: alias } = await supabase
-      .from("ocr_aliases")
-      .select("matched_medicine_id, medicines(*)")
-      .ilike("raw_text", rawText)
-      .limit(1)
-      .maybeSingle();
+    // 1. Check ocr_aliases for verified patient corrections (rawText, raw_name, and dosage-stripped forms)
+    const strippedRawText = stripDosageFormPrefixes(rawText);
+    const strippedRawName = stripDosageFormPrefixes(medItem.raw_name);
+    const aliasProbeCandidates = Array.from(
+      new Set(
+        [rawText, medItem.raw_name.trim(), strippedRawText, strippedRawName].filter(
+          (s) => s.length >= 2
+        )
+      )
+    );
 
-    if (!alias?.medicines && medItem.raw_name && medItem.raw_name.trim() !== rawText) {
-      const { data: nameOnlyAlias } = await supabase
+    let alias: {
+      matched_medicine_id: string;
+      medicines: unknown;
+    } | null = null;
+
+    for (const probe of aliasProbeCandidates) {
+      const { data: aliasHit } = await supabase
         .from("ocr_aliases")
         .select("matched_medicine_id, medicines(*)")
-        .ilike("raw_text", medItem.raw_name.trim())
+        .ilike("raw_text", probe)
         .limit(1)
         .maybeSingle();
-      alias = nameOnlyAlias;
+
+      if (aliasHit?.medicines) {
+        alias = aliasHit;
+        break;
+      }
     }
 
     if (alias?.medicines) {
@@ -473,53 +551,108 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
         dbMed.is_schedule_h || isScheduleHComposition(dbMed.composition_display || dbMed.brand_name);
       matchStatus = "alias";
     } else {
-      // 2. Query medicines catalog by brand_name
-      const cleanBrandQuery = medItem.raw_name.replace(/[^a-zA-Z0-9\s-]/g, " ").trim();
-      let { data: medMatches } = await supabase
-        .from("medicines")
-        .select("*")
-        .ilike("brand_name", cleanBrandQuery)
-        .limit(1);
+      // 2. Query medicines catalog by dosage-stripped brand_name (never matching "Tab"/"Cap")
+      const { exactQueries, prefixToken } = extractBrandSearchCandidates(
+        medItem.raw_name,
+        medItem.strength
+      );
 
-      if (!medMatches || medMatches.length === 0) {
-        const firstWord = cleanBrandQuery.split(/\s+/)[0];
-        if (firstWord && firstWord.length >= 3) {
-          const { data: prefixMatches } = await supabase
-            .from("medicines")
-            .select("*")
-            .ilike("brand_name", `${firstWord}%`)
-            .limit(1);
-          medMatches = prefixMatches;
+      type DbMedRow = {
+        id: string;
+        brand_name: string;
+        composition_display: string;
+        composition_key: string;
+        is_nti: boolean;
+        is_schedule_h: boolean;
+      };
+
+      let exactDbMatch: DbMedRow | null = null;
+      for (const eqQuery of exactQueries) {
+        const { data: medMatches } = await supabase
+          .from("medicines")
+          .select("id, brand_name, composition_display, composition_key, is_nti, is_schedule_h")
+          .ilike("brand_name", eqQuery)
+          .limit(1);
+
+        if (medMatches && medMatches.length > 0) {
+          exactDbMatch = medMatches[0] as DbMedRow;
+          break;
         }
       }
 
-      if (medMatches && medMatches.length > 0) {
-        const dbMed = medMatches[0];
-        matchedMedId = dbMed.id;
-        brandName = dbMed.brand_name;
-        compositionDisplay = dbMed.composition_display;
-        compositionKey = dbMed.composition_key;
-        isNti = dbMed.is_nti || isNtiComposition(dbMed.composition_display || dbMed.brand_name);
+      if (exactDbMatch) {
+        matchedMedId = exactDbMatch.id;
+        brandName = exactDbMatch.brand_name;
+        compositionDisplay = exactDbMatch.composition_display;
+        compositionKey = exactDbMatch.composition_key;
+        isNti =
+          exactDbMatch.is_nti ||
+          isNtiComposition(exactDbMatch.composition_display || exactDbMatch.brand_name);
         isScheduleH =
-          dbMed.is_schedule_h || isScheduleHComposition(dbMed.composition_display || dbMed.brand_name);
+          exactDbMatch.is_schedule_h ||
+          isScheduleHComposition(exactDbMatch.composition_display || exactDbMatch.brand_name);
         matchStatus = "exact";
       } else {
-        // 3. Lazy-loaded fuzzy fallback (>= 90% auto-match, < 90% dropdown suggestions)
-        const catalog = await getCatalogForFuzzy();
-        const fuzzyResult = findFuzzyMedicineMatches(rawText || medItem.raw_name, catalog);
-        suggestions = fuzzyResult.suggestions;
-        matchStatus = fuzzyResult.status;
+        let handledByPrefix = false;
+        if (prefixToken) {
+          const { data: prefixMatches } = await supabase
+            .from("medicines")
+            .select("id, brand_name, composition_display, composition_key, is_nti, is_schedule_h")
+            .ilike("brand_name", `${prefixToken}%`)
+            .limit(10);
 
-        if (fuzzyResult.status === "auto_matched" && fuzzyResult.matchedMedicine) {
-          const fuzzyMed = fuzzyResult.matchedMedicine;
-          matchedMedId = fuzzyMed.id;
-          brandName = fuzzyMed.brand_name;
-          compositionDisplay = fuzzyMed.composition_display;
-          compositionKey = fuzzyMed.composition_key || buildCompositionKey(fuzzyMed.composition_display);
-          isNti = fuzzyMed.is_nti || isNtiComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
-          isScheduleH =
-            fuzzyMed.is_schedule_h ||
-            isScheduleHComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
+          if (prefixMatches && prefixMatches.length > 0) {
+            const prefixSelection = selectBestPrefixMatch(
+              rawText || medItem.raw_name,
+              prefixMatches as CandidateMedicine[],
+              medItem.dosage_instructions
+            );
+            if (prefixSelection.status) {
+              handledByPrefix = true;
+              suggestions = prefixSelection.suggestions;
+              matchStatus = prefixSelection.status;
+              if (prefixSelection.matchedMedicine) {
+                const pm = prefixSelection.matchedMedicine;
+                matchedMedId = pm.id;
+                brandName = pm.brand_name;
+                compositionDisplay = pm.composition_display;
+                compositionKey = pm.composition_key || buildCompositionKey(pm.composition_display);
+                isNti = pm.is_nti || isNtiComposition(pm.composition_display || pm.brand_name);
+                isScheduleH =
+                  pm.is_schedule_h ||
+                  isScheduleHComposition(pm.composition_display || pm.brand_name);
+              }
+            }
+          }
+        }
+
+        if (!handledByPrefix) {
+          // 3. Lazy-loaded fuzzy fallback with dosageHint + normalized aliases
+          const [catalog, aliasesMap] = await Promise.all([
+            getCatalogForFuzzy(),
+            getAliasLookupMap(),
+          ]);
+          const fuzzyResult = findFuzzyMedicineMatches(rawText || medItem.raw_name, catalog, {
+            dosageHint: medItem.dosage_instructions,
+            aliases: aliasesMap,
+          });
+          suggestions = fuzzyResult.suggestions;
+          matchStatus = fuzzyResult.status;
+
+          if (fuzzyResult.status === "auto_matched" && fuzzyResult.matchedMedicine) {
+            const fuzzyMed = fuzzyResult.matchedMedicine;
+            matchedMedId = fuzzyMed.id;
+            brandName = fuzzyMed.brand_name;
+            compositionDisplay = fuzzyMed.composition_display;
+            compositionKey =
+              fuzzyMed.composition_key || buildCompositionKey(fuzzyMed.composition_display);
+            isNti =
+              fuzzyMed.is_nti ||
+              isNtiComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
+            isScheduleH =
+              fuzzyMed.is_schedule_h ||
+              isScheduleHComposition(fuzzyMed.composition_display || fuzzyMed.brand_name);
+          }
         }
       }
     }
