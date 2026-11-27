@@ -18,6 +18,13 @@ import type { Database } from "@/types/database.types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ConfirmedMedicine } from "@/types/contracts";
 import { isNtiComposition } from "./nti-list";
+import {
+  areDosageFormsCompatible,
+  buildCanonicalCompositionKey,
+  calculateUnitPrice,
+  detectDosageForm,
+  type DosageForm,
+} from "./normalize";
 
 export type { ConfirmedMedicine };
 
@@ -44,6 +51,7 @@ export interface MedicineReference {
   composition_key: string;
   mrp: number;
   brand_name?: string;
+  pack_size?: string | null;
   composition_display?: string;
   is_jan_aushadhi?: boolean;
   is_nti?: boolean;
@@ -53,6 +61,10 @@ export interface MedicineReference {
 export interface AlternativeMedicineItem extends MedicineSearchItem {
   savings: number;
   savings_pct: number;
+  dosage_form?: DosageForm;
+  unit_price?: number | null;
+  unit_label?: string | null;
+  pack_count?: number | null;
 }
 
 export interface SameSaltAlternativesGroup {
@@ -68,6 +80,14 @@ export interface SameSaltAlternativesGroup {
   otherSameSaltBrands: AlternativeMedicineItem[];
   /** Total count of all alternative choices found (excluding the selected medicine) */
   totalOptionsCount: number;
+  /** Detected dosage form of the selected medicine */
+  selected_dosage_form?: DosageForm;
+  /** Per-unit price metadata for the selected medicine, when pack_size is parseable */
+  selected_unit_price?: number | null;
+  selected_unit_label?: string | null;
+  selected_pack_count?: number | null;
+  /** Count of same-composition candidates excluded due to incompatible dosage form */
+  filteredOutIncompatibleCount?: number;
 }
 
 export interface SearchMedicinesOptions {
@@ -112,10 +132,9 @@ export function calculateSavings(
 /**
  * Ranks type-ahead search results so brand name prefix matches rank higher than composition matches.
  */
-function rankSearchResults(
-  items: MedicineSearchItem[],
-  normalizedQuery: string
-): MedicineSearchItem[] {
+export function rankSearchResults<
+  T extends Pick<MedicineSearchItem, "brand_name" | "composition_display" | "mrp">
+>(items: T[], normalizedQuery: string): T[] {
   const lowerQ = normalizedQuery.toLowerCase();
 
   return [...items].sort((a, b) => {
@@ -218,6 +237,16 @@ export function groupSameSaltMedicines(
 ): SameSaltAlternativesGroup {
   const enforceNtiLock = options?.enforceNtiLock !== false;
 
+  const selectedForm = detectDosageForm(
+    selectedMedicine.brand_name || "",
+    selectedMedicine.pack_size,
+    selectedMedicine.composition_display
+  );
+  const selectedUnitInfo = calculateUnitPrice(
+    Number(selectedMedicine.mrp) || 0,
+    selectedMedicine.pack_size
+  );
+
   // Verify NTI status from medicine record or clinical reference list
   const isNti =
     Boolean(selectedMedicine.is_nti) ||
@@ -238,6 +267,11 @@ export function groupSameSaltMedicines(
       janAushadhiOptions: [],
       otherSameSaltBrands: [],
       totalOptionsCount: 0,
+      selected_dosage_form: selectedForm,
+      selected_unit_price: selectedUnitInfo.unitPrice,
+      selected_unit_label: selectedUnitInfo.unitLabel,
+      selected_pack_count: selectedUnitInfo.count,
+      filteredOutIncompatibleCount: 0,
     };
   }
 
@@ -246,6 +280,10 @@ export function groupSameSaltMedicines(
   const otherSameSaltBrands: AlternativeMedicineItem[] = [];
 
   const baseMrp = Number(selectedMedicine.mrp) || 0;
+  const selectedCanonicalKey = selectedMedicine.composition_display
+    ? buildCanonicalCompositionKey(selectedMedicine.composition_display)
+    : buildCanonicalCompositionKey(selectedMedicine.composition_key);
+  let filteredOutIncompatibleCount = 0;
 
   for (const cand of candidateMedicines) {
     // Exclude the selected medicine itself
@@ -253,16 +291,42 @@ export function groupSameSaltMedicines(
       continue;
     }
 
-    // Must match the exact composition_key
-    if (cand.composition_key !== selectedMedicine.composition_key) {
+    // Must match exact composition_key OR equivalent canonical composition key
+    const candCanonicalKey = cand.composition_display
+      ? buildCanonicalCompositionKey(cand.composition_display)
+      : buildCanonicalCompositionKey(cand.composition_key);
+    const sameComposition =
+      cand.composition_key === selectedMedicine.composition_key ||
+      (Boolean(selectedCanonicalKey) &&
+        Boolean(candCanonicalKey) &&
+        candCanonicalKey === selectedCanonicalKey);
+
+    if (!sameComposition) {
+      continue;
+    }
+
+    // Enforce dosage-form compatibility (e.g., never propose syrup/injection for oral tablet)
+    const candForm = detectDosageForm(
+      cand.brand_name,
+      cand.pack_size,
+      cand.composition_display
+    );
+    if (!areDosageFormsCompatible(selectedForm, candForm)) {
+      filteredOutIncompatibleCount++;
       continue;
     }
 
     const { savings, savings_pct } = calculateSavings(baseMrp, cand.mrp);
+    const candUnitInfo = calculateUnitPrice(cand.mrp, cand.pack_size);
+
     const item: AlternativeMedicineItem = {
       ...cand,
       savings,
       savings_pct,
+      dosage_form: candForm,
+      unit_price: candUnitInfo.unitPrice,
+      unit_label: candUnitInfo.unitLabel,
+      pack_count: candUnitInfo.count,
     };
 
     if (cand.is_jan_aushadhi) {
@@ -296,6 +360,11 @@ export function groupSameSaltMedicines(
     janAushadhiOptions,
     otherSameSaltBrands,
     totalOptionsCount,
+    selected_dosage_form: selectedForm,
+    selected_unit_price: selectedUnitInfo.unitPrice,
+    selected_unit_label: selectedUnitInfo.unitLabel,
+    selected_pack_count: selectedUnitInfo.count,
+    filteredOutIncompatibleCount,
   };
 }
 

@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/types/database.types";
+import {
+  calculateSavings,
+  groupSameSaltMedicines,
+  rankSearchResults,
+  sanitizeSearchQuery,
+  type MedicineSearchItem,
+} from "@/lib/clinical/medicine-search";
+import { isNtiComposition } from "@/lib/clinical/nti-list";
 
 export type MedicineRow = Database["public"]["Tables"]["medicines"]["Row"];
 
@@ -26,17 +34,6 @@ const medicineIdSchema = z.string().uuid({
 });
 
 /**
- * Sanitizes search input to prevent PostgREST .or() filter syntax breakage.
- * Strips commas, parentheses, colons, quotes, and structural filter characters.
- */
-function sanitizeSearchQuery(input: string): string {
-  return input
-    .replace(/[(),":\\;.[\]{}]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
  * GET /api/search
  *
  * Query params:
@@ -44,8 +41,9 @@ function sanitizeSearchQuery(input: string): string {
  * - medicine_id: UUID of a medicine to fetch same-salt alternatives
  *
  * Modes:
- * - Mode A: Text Search (?q=<query>)
- * - Mode B: Same-Salt Alternatives (?medicine_id=<uuid>)
+ * - Mode A: Text Search (?q=<query>) — uses shared sanitization & clinical relevance ranking
+ * - Mode B: Same-Salt Alternatives (?medicine_id=<uuid>) — enforces NTI lock (DB + isNtiComposition)
+ *           and dosage-form compatibility via shared `groupSameSaltMedicines`.
  */
 export async function GET(request: NextRequest) {
   // 1. Authenticate user session via cookie-based Supabase client
@@ -102,8 +100,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Medicine not found" }, { status: 404 });
     }
 
-    // NTI Clinical Safety Lock: Strict Do-Not-Substitute rule
-    if (medicine.is_nti) {
+    // NTI Clinical Safety Lock: DB flag OR deterministic composition/brand check
+    const isNti =
+      Boolean(medicine.is_nti) ||
+      isNtiComposition(medicine.composition_key) ||
+      isNtiComposition(medicine.composition_display) ||
+      isNtiComposition(medicine.brand_name);
+
+    if (isNti) {
       const response: SearchAlternativesResponse = {
         medicine,
         nti_locked: true,
@@ -126,20 +130,32 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: altError.message }, { status: 500 });
     }
 
-    const alternatives: SearchAlternativeItem[] = (altRows ?? []).map((alt) => {
-      const rawSavings = medicine.mrp - alt.mrp;
-      const savings = Math.max(0, Number(rawSavings.toFixed(2)));
-      const savings_pct =
-        medicine.mrp > 0
-          ? Number((((medicine.mrp - alt.mrp) / medicine.mrp) * 100).toFixed(1))
-          : 0;
+    const rawById = new Map((altRows ?? []).map((r) => [r.id, r]));
+    const grouped = groupSameSaltMedicines(
+      medicine as MedicineSearchItem,
+      (altRows ?? []) as MedicineSearchItem[],
+      { enforceNtiLock: true }
+    );
 
-      return {
-        ...alt,
-        savings,
-        savings_pct,
-      };
-    });
+    const compatibleIds = [
+      ...grouped.janAushadhiOptions,
+      ...grouped.lowerPriceAlternatives,
+      ...grouped.otherSameSaltBrands,
+    ]
+      .sort((a, b) => a.mrp - b.mrp)
+      .map((a) => a.id);
+
+    const alternatives: SearchAlternativeItem[] = compatibleIds
+      .map((id) => rawById.get(id))
+      .filter((alt): alt is MedicineRow => Boolean(alt))
+      .map((alt) => {
+        const { savings, savings_pct } = calculateSavings(medicine.mrp, alt.mrp);
+        return {
+          ...alt,
+          savings,
+          savings_pct,
+        };
+      });
 
     const response: SearchAlternativesResponse = {
       medicine,
@@ -167,15 +183,16 @@ export async function GET(request: NextRequest) {
     .or(
       `brand_name.ilike.%${sanitizedQ}%,composition_display.ilike.%${sanitizedQ}%`
     )
-    .order("mrp", { ascending: true })
-    .limit(15);
+    .limit(30);
 
   if (searchError) {
     return NextResponse.json({ error: searchError.message }, { status: 500 });
   }
 
+  const ranked = rankSearchResults(medicines ?? [], sanitizedQ).slice(0, 15);
+
   const response: SearchTextResponse = {
-    medicines: medicines ?? [],
+    medicines: ranked,
   };
 
   return NextResponse.json(response);
