@@ -15,7 +15,7 @@
  * Branch: p2-ai-data
  */
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -67,6 +67,7 @@ export interface ReviewRowState {
   // Confirmation & hydration state
   isConfirmed: boolean;
   isHydrating?: boolean;
+  hydrationError?: string | null;
 
   // Unlocked alternatives
   alternativesLoading: boolean;
@@ -104,35 +105,71 @@ export function MedicineReviewRow({
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogResults, setCatalogResults] = useState<MedicineSearchItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
   const [isCustomMode, setIsCustomMode] = useState(false);
   const [customName, setCustomName] = useState(row.brand_name || "");
   const [customStrength, setCustomStrength] = useState(row.custom_strength || "");
+  const searchAbortRef = useRef<AbortController | null>(null);
 
   const hasValidCatalogUuid =
     !row.is_custom && isValidMedicineUuid(row.matched_medicine_id);
 
-  // Debounced search for catalog
+  // Catalog search with AbortController and error/empty-state handling
   const handleCatalogSearch = async (query: string) => {
     setCatalogQuery(query);
+    setSearchError(null);
+
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+      searchAbortRef.current = null;
+    }
+
     if (!query.trim() || query.trim().length < 2) {
       setCatalogResults([]);
+      setHasSearched(false);
+      setIsSearching(false);
       return;
     }
 
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
     setIsSearching(true);
+
     try {
       const res = await fetch(
-        `/api/medicines/search?q=${encodeURIComponent(query.trim())}&limit=5`
+        `/api/medicines/search?q=${encodeURIComponent(query.trim())}&limit=5`,
+        { signal: controller.signal }
       );
-      if (res.ok) {
-        const data = await res.json();
-        setCatalogResults(data.medicines || []);
+      if (controller.signal.aborted) return;
+
+      if (!res.ok) {
+        setCatalogResults([]);
+        setHasSearched(true);
+        setSearchError("Catalog search failed. Please try again.");
+        return;
       }
+
+      const data = await res.json();
+      setCatalogResults(data.medicines || []);
+      setHasSearched(true);
     } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
       console.warn("Catalog search error:", err);
+      setCatalogResults([]);
+      setHasSearched(true);
+      setSearchError("Unable to reach catalog search. Check your connection.");
     } finally {
-      setIsSearching(false);
+      if (!controller.signal.aborted) {
+        setIsSearching(false);
+      }
     }
+  };
+
+  const handleOpenCustomMode = () => {
+    setCustomName(row.brand_name || "");
+    setCustomStrength(row.custom_strength || "");
+    setIsCustomMode(true);
   };
 
   // Select a suggestion or catalog match (defers final confirmation for partial suggestions until hydrated)
@@ -398,6 +435,21 @@ export function MedicineReviewRow({
         {/* ----------------- State A: UNCONFIRMED Resolution Flow ----------------- */}
         {!row.isConfirmed && (
           <div className="mt-4 border-t border-slate-200/70 pt-4 space-y-3">
+            {row.hydrationError && (
+              <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-900 flex items-center justify-between gap-2">
+                <span>{row.hydrationError}</span>
+                {hasValidCatalogUuid && (
+                  <button
+                    type="button"
+                    onClick={() => onConfirmRow({ ...row, hydrationError: null })}
+                    className="shrink-0 rounded bg-rose-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-rose-800"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            )}
+
             {!hasValidCatalogUuid && !row.isHydrating && (
               <div className="rounded-lg border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs text-sky-900">
                 Select a matched medicine below or search the catalog so we can verify clinical safety and pharmacy pricing.
@@ -463,6 +515,19 @@ export function MedicineReviewRow({
                     <RefreshCw className="absolute right-2.5 top-2 h-4 w-4 animate-spin text-slate-400" />
                   )}
                 </div>
+
+                {searchError && (
+                  <p className="text-xs text-rose-700 font-medium">{searchError}</p>
+                )}
+
+                {!searchError &&
+                  hasSearched &&
+                  !isSearching &&
+                  catalogResults.length === 0 && (
+                    <p className="text-xs text-slate-500 italic">
+                      No matching medicines found for &ldquo;{catalogQuery.trim()}&rdquo;.
+                    </p>
+                  )}
 
                 {catalogResults.length > 0 && (
                   <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 rounded-md border border-slate-200 bg-white">
@@ -546,7 +611,7 @@ export function MedicineReviewRow({
                 <span className="text-slate-300">•</span>
                 <button
                   type="button"
-                  onClick={() => setIsCustomMode(true)}
+                  onClick={handleOpenCustomMode}
                   className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 underline"
                 >
                   Enter manual brand name

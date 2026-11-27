@@ -16,7 +16,7 @@
  * Branch: p2-ai-data
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useRef, useState, useMemo } from "react";
 import {
   Plus,
   Search,
@@ -29,10 +29,14 @@ import {
 import type { ExtractedMedicineItem, ConfirmedMedicine } from "@/types/contracts";
 import type { MedicineSearchItem } from "@/lib/clinical/medicine-search";
 import { recordOcrAlias } from "@/lib/clinical/alias-learning";
+import { evaluatePrescriptionSafety } from "@/lib/clinical/safety-check";
 import {
   buildConfirmedMedicinesPayload,
+  buildHydrationFailurePatch,
   isValidMedicineUuid,
   mergeRowClinicalSafetyFlags,
+  mergeSafetyEvaluationIntoRows,
+  shouldApplyHydrationResult,
 } from "@/lib/clinical/review-handoff";
 import {
   MedicineReviewRow,
@@ -88,6 +92,7 @@ export function PrescriptionReviewFlow({
         is_custom: false,
         isConfirmed: false, // Right Medicine First: user must verify
         isHydrating: false,
+        hydrationError: null,
 
         alternativesLoading: false,
         alternativesGroup: null,
@@ -96,25 +101,78 @@ export function PrescriptionReviewFlow({
     });
   });
 
+  // Async race-protection sequence refs
+  const hydrationSeqRef = useRef<Record<string, number>>({});
+  const safetySeqRef = useRef(0);
+  const typeaheadAbortRef = useRef<AbortController | null>(null);
+
   // State for top "+ Add Medicine" type-ahead search
   const [isAddingMedicine, setIsAddingMedicine] = useState(false);
   const [typeaheadQuery, setTypeaheadQuery] = useState("");
   const [typeaheadResults, setTypeaheadResults] = useState<MedicineSearchItem[]>([]);
   const [isSearchingTypeahead, setIsSearchingTypeahead] = useState(false);
+  const [typeaheadError, setTypeaheadError] = useState<string | null>(null);
+  const [hasSearchedTypeahead, setHasSearchedTypeahead] = useState(false);
+
+  // Evaluate clinical safety across active rows via POST /api/safety (graceful offline/unauth fallback)
+  const refreshPrescriptionSafety = async (snapshotRows: ReviewRowState[]) => {
+    const validRows = snapshotRows.filter((r) => r.brand_name.trim().length > 0);
+    if (validRows.length === 0) return;
+
+    const mySeq = ++safetySeqRef.current;
+    const safetyInputs = validRows.map((r) => ({
+      temp_id: r.temp_id,
+      medicine_id: isValidMedicineUuid(r.matched_medicine_id) ? r.matched_medicine_id : null,
+      brand_name: r.brand_name,
+      composition_display: r.composition_display,
+      composition_key: r.composition_key,
+      is_nti: r.is_nti,
+      is_schedule_h: r.is_schedule_h,
+    }));
+
+    try {
+      const res = await fetch("/api/safety", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: safetyInputs }),
+      });
+
+      if (safetySeqRef.current !== mySeq) return;
+
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.items)) {
+          setRows((prev) => mergeSafetyEvaluationIntoRows(prev, data.items));
+          return;
+        }
+      }
+    } catch {
+      // Fall back to deterministic client-side evaluation below
+    }
+
+    if (safetySeqRef.current !== mySeq) return;
+    const localReport = evaluatePrescriptionSafety(safetyInputs, {});
+    setRows((prev) => mergeSafetyEvaluationIntoRows(prev, localReport.items));
+  };
 
   // Hydrate authoritative catalog metadata + alternatives + safety flags before finalizing confirmation
   const hydrateAndConfirmRow = async (
     candidateRow: ReviewRowState,
     medicineId: string
   ) => {
+    const rowId = candidateRow.temp_id;
+    const mySeq = (hydrationSeqRef.current[rowId] ?? 0) + 1;
+    hydrationSeqRef.current[rowId] = mySeq;
+
     setRows((prev) =>
       prev.map((r) =>
-        r.temp_id === candidateRow.temp_id
+        r.temp_id === rowId
           ? {
               ...candidateRow,
               isHydrating: true,
+              hydrationError: null,
               alternativesLoading: true,
-              isConfirmed: candidateRow.isConfirmed,
+              isConfirmed: false,
             }
           : r
       )
@@ -122,79 +180,86 @@ export function PrescriptionReviewFlow({
 
     try {
       const res = await fetch(`/api/medicines/search?medicine_id=${medicineId}`);
-      if (res.ok) {
-        const data = await res.json();
-        const baseMed: MedicineSearchItem | undefined = data.medicine;
+      if (!shouldApplyHydrationResult(hydrationSeqRef.current, rowId, mySeq)) {
+        return;
+      }
 
+      if (!res.ok) {
+        const failurePatch = buildHydrationFailurePatch(
+          res.status === 404
+            ? "Medicine was not found in the catalog. Please search and select again."
+            : "Could not verify medicine details from catalog. Please retry."
+        );
         setRows((prev) =>
-          prev.map((r) => {
-            if (r.temp_id !== candidateRow.temp_id) return r;
-            const mergedBrand = baseMed?.brand_name || r.brand_name;
-            const mergedCompDisplay =
-              baseMed?.composition_display || r.composition_display;
-            const mergedCompKey = baseMed?.composition_key || r.composition_key;
-            const { isNti, isScheduleH, safetyFlags } = mergeRowClinicalSafetyFlags(
-              r.safety_flags,
-              {
-                brand_name: mergedBrand,
-                composition_display: mergedCompDisplay,
-                composition_key: mergedCompKey,
-                is_nti: Boolean(baseMed?.is_nti || r.is_nti),
-                is_schedule_h: Boolean(baseMed?.is_schedule_h || r.is_schedule_h),
-              }
-            );
-
-            return {
-              ...r,
-              matched_medicine_id: baseMed?.id || medicineId,
-              brand_name: mergedBrand,
-              composition_display: mergedCompDisplay,
-              composition_key: mergedCompKey,
-              mrp: baseMed?.mrp ?? r.mrp,
-              is_jan_aushadhi: baseMed?.is_jan_aushadhi ?? r.is_jan_aushadhi,
-              is_nti: isNti,
-              is_schedule_h: isScheduleH,
-              safety_flags: safetyFlags,
-              selected_alternative_id: isNti ? null : r.selected_alternative_id,
-              alternativesGroup: data.groups ?? null,
-              alternativesLoading: false,
-              isHydrating: false,
-              isConfirmed: true,
-            };
-          })
+          prev.map((r) => (r.temp_id === rowId ? { ...r, ...failurePatch } : r))
         );
         return;
       }
-    } catch (err) {
-      console.warn("Failed to hydrate medicine details:", err);
-    }
 
-    // Fallback when catalog fetch fails: still enforce deterministic NTI/Schedule H safety before confirming
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r.temp_id !== candidateRow.temp_id) return r;
-        const { isNti, isScheduleH, safetyFlags } = mergeRowClinicalSafetyFlags(
-          r.safety_flags,
-          {
-            brand_name: r.brand_name,
-            composition_display: r.composition_display,
-            composition_key: r.composition_key,
-            is_nti: r.is_nti,
-            is_schedule_h: r.is_schedule_h,
-          }
-        );
-        return {
-          ...r,
-          is_nti: isNti,
-          is_schedule_h: isScheduleH,
-          safety_flags: safetyFlags,
-          selected_alternative_id: isNti ? null : r.selected_alternative_id,
-          alternativesLoading: false,
-          isHydrating: false,
-          isConfirmed: true,
-        };
-      })
-    );
+      const data = await res.json();
+      if (!shouldApplyHydrationResult(hydrationSeqRef.current, rowId, mySeq)) {
+        return;
+      }
+
+      const baseMed: MedicineSearchItem | undefined = data.medicine;
+      let nextSnapshot: ReviewRowState[] = [];
+
+      setRows((prev) => {
+        nextSnapshot = prev.map((r) => {
+          if (r.temp_id !== rowId) return r;
+          const mergedBrand = baseMed?.brand_name || r.brand_name;
+          const mergedCompDisplay =
+            baseMed?.composition_display || r.composition_display;
+          const mergedCompKey = baseMed?.composition_key || r.composition_key;
+          const { isNti, isScheduleH, safetyFlags } = mergeRowClinicalSafetyFlags(
+            r.safety_flags,
+            {
+              brand_name: mergedBrand,
+              composition_display: mergedCompDisplay,
+              composition_key: mergedCompKey,
+              is_nti: Boolean(baseMed?.is_nti || r.is_nti),
+              is_schedule_h: Boolean(baseMed?.is_schedule_h || r.is_schedule_h),
+            }
+          );
+
+          return {
+            ...r,
+            matched_medicine_id: baseMed?.id || medicineId,
+            brand_name: mergedBrand,
+            composition_display: mergedCompDisplay,
+            composition_key: mergedCompKey,
+            mrp: baseMed?.mrp ?? r.mrp,
+            is_jan_aushadhi: baseMed?.is_jan_aushadhi ?? r.is_jan_aushadhi,
+            is_nti: isNti,
+            is_schedule_h: isScheduleH,
+            safety_flags: safetyFlags,
+            selected_alternative_id: isNti ? null : r.selected_alternative_id,
+            alternativesGroup: data.groups ?? null,
+            alternativesLoading: false,
+            isHydrating: false,
+            hydrationError: null,
+            isConfirmed: true,
+          };
+        });
+        return nextSnapshot;
+      });
+
+      if (nextSnapshot.length > 0) {
+        void refreshPrescriptionSafety(nextSnapshot);
+      }
+      return;
+    } catch (err) {
+      if (!shouldApplyHydrationResult(hydrationSeqRef.current, rowId, mySeq)) {
+        return;
+      }
+      console.warn("Failed to hydrate medicine details:", err);
+      const failurePatch = buildHydrationFailurePatch(
+        "Network error while verifying medicine details. Please retry."
+      );
+      setRows((prev) =>
+        prev.map((r) => (r.temp_id === rowId ? { ...r, ...failurePatch } : r))
+      );
+    }
   };
 
   // Row Confirmation Action
@@ -213,6 +278,8 @@ export function PrescriptionReviewFlow({
 
     // Custom / unlinked entry: confirm locally without catalog alternatives
     if (confirmedRow.is_custom || !isValidMedicineUuid(confirmedRow.matched_medicine_id)) {
+      hydrationSeqRef.current[confirmedRow.temp_id] =
+        (hydrationSeqRef.current[confirmedRow.temp_id] ?? 0) + 1;
       setRows((prev) =>
         prev.map((r) =>
           r.temp_id === confirmedRow.temp_id
@@ -222,6 +289,7 @@ export function PrescriptionReviewFlow({
                 is_custom: true,
                 isConfirmed: true,
                 isHydrating: false,
+                hydrationError: null,
                 alternativesLoading: false,
               }
             : r
@@ -234,8 +302,9 @@ export function PrescriptionReviewFlow({
     void hydrateAndConfirmRow(confirmedRow, confirmedRow.matched_medicine_id);
   };
 
-  // Unconfirm row (re-verify)
+  // Unconfirm row (invalidate any in-flight hydration request)
   const handleUnconfirmRow = (rowId: string) => {
+    hydrationSeqRef.current[rowId] = (hydrationSeqRef.current[rowId] ?? 0) + 1;
     setRows((prev) =>
       prev.map((r) =>
         r.temp_id === rowId
@@ -243,6 +312,8 @@ export function PrescriptionReviewFlow({
               ...r,
               isConfirmed: false,
               isHydrating: false,
+              hydrationError: null,
+              alternativesLoading: false,
               selected_alternative_id: null,
             }
           : r
@@ -277,32 +348,67 @@ export function PrescriptionReviewFlow({
     );
   };
 
-  // Remove row
+  // Remove row (invalidate any in-flight hydration request and re-evaluate interactions)
   const handleRemoveRow = (rowId: string) => {
-    setRows((prev) => prev.filter((r) => r.temp_id !== rowId));
+    hydrationSeqRef.current[rowId] = (hydrationSeqRef.current[rowId] ?? 0) + 1;
+    let remaining: ReviewRowState[] = [];
+    setRows((prev) => {
+      remaining = prev.filter((r) => r.temp_id !== rowId);
+      return remaining;
+    });
+    if (remaining.length > 0) {
+      void refreshPrescriptionSafety(remaining);
+    }
   };
 
   // Handle type-ahead search for adding medicine directly
   const handleTypeaheadSearch = async (query: string) => {
     setTypeaheadQuery(query);
+    setTypeaheadError(null);
+
+    if (typeaheadAbortRef.current) {
+      typeaheadAbortRef.current.abort();
+      typeaheadAbortRef.current = null;
+    }
+
     if (!query.trim() || query.trim().length < 2) {
       setTypeaheadResults([]);
+      setHasSearchedTypeahead(false);
+      setIsSearchingTypeahead(false);
       return;
     }
 
+    const controller = new AbortController();
+    typeaheadAbortRef.current = controller;
     setIsSearchingTypeahead(true);
+
     try {
       const res = await fetch(
-        `/api/medicines/search?q=${encodeURIComponent(query.trim())}&limit=6`
+        `/api/medicines/search?q=${encodeURIComponent(query.trim())}&limit=6`,
+        { signal: controller.signal }
       );
-      if (res.ok) {
-        const data = await res.json();
-        setTypeaheadResults(data.medicines || []);
+      if (controller.signal.aborted) return;
+
+      if (!res.ok) {
+        setTypeaheadResults([]);
+        setHasSearchedTypeahead(true);
+        setTypeaheadError("Catalog search failed. Please try again.");
+        return;
       }
+
+      const data = await res.json();
+      setTypeaheadResults(data.medicines || []);
+      setHasSearchedTypeahead(true);
     } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
       console.warn("Direct medicine search error:", err);
+      setTypeaheadResults([]);
+      setHasSearchedTypeahead(true);
+      setTypeaheadError("Unable to reach catalog search. Check your connection.");
     } finally {
-      setIsSearchingTypeahead(false);
+      if (!controller.signal.aborted) {
+        setIsSearchingTypeahead(false);
+      }
     }
   };
 
@@ -336,8 +442,9 @@ export function PrescriptionReviewFlow({
       safety_flags: safetyFlags,
 
       is_custom: false,
-      isConfirmed: true,
-      isHydrating: false,
+      isConfirmed: false,
+      isHydrating: true,
+      hydrationError: null,
 
       alternativesLoading: true,
       alternativesGroup: null,
@@ -348,6 +455,8 @@ export function PrescriptionReviewFlow({
     setIsAddingMedicine(false);
     setTypeaheadQuery("");
     setTypeaheadResults([]);
+    setTypeaheadError(null);
+    setHasSearchedTypeahead(false);
 
     void hydrateAndConfirmRow(newRow, med.id);
   };
@@ -462,6 +571,19 @@ export function PrescriptionReviewFlow({
               <RefreshCw className="absolute right-3 top-2.5 h-4 w-4 animate-spin text-slate-400" />
             )}
           </div>
+
+          {typeaheadError && (
+            <p className="text-xs text-rose-700 font-medium">{typeaheadError}</p>
+          )}
+
+          {!typeaheadError &&
+            hasSearchedTypeahead &&
+            !isSearchingTypeahead &&
+            typeaheadResults.length === 0 && (
+              <p className="text-xs text-slate-500 italic">
+                No matching medicines found for &ldquo;{typeaheadQuery.trim()}&rdquo;.
+              </p>
+            )}
 
           {typeaheadResults.length > 0 && (
             <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white shadow-sm">

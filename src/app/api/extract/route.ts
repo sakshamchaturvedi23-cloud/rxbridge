@@ -426,7 +426,17 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
     );
   }
 
-  const ocrData = ocrResponseSchema.parse(parsedJson);
+  const ocrParsed = ocrResponseSchema.safeParse(parsedJson);
+  if (!ocrParsed.success) {
+    return NextResponse.json(
+      {
+        error: "OCR response did not match expected schema",
+        details: ocrParsed.error.format(),
+      },
+      { status: 502 }
+    );
+  }
+  const ocrData = ocrParsed.data;
 
   // Compute trust checks
   const dateValid = checkDateValid(ocrData.prescription_date);

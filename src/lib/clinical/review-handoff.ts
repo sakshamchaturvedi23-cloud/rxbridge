@@ -197,3 +197,81 @@ export function buildValidatedPlanRequest(
     items: confirmedMedicinesToPlanItems(sanitizedMedicines),
   };
 }
+
+/**
+ * Checks whether an async hydration response matches the latest sequence token
+ * for `rowId`, preventing late responses from overwriting unconfirmed or removed rows.
+ */
+export function shouldApplyHydrationResult(
+  sequenceMap: Readonly<Record<string, number>>,
+  rowId: string,
+  expectedSeq: number
+): boolean {
+  return (sequenceMap[rowId] ?? 0) === expectedSeq;
+}
+
+/**
+ * Produces a non-confirmed error state when catalog hydration fails, rather than silently
+ * confirming a row with stale `mrp: 0`.
+ */
+export function buildHydrationFailurePatch(errorMessage?: string): {
+  isHydrating: false;
+  alternativesLoading: false;
+  isConfirmed: false;
+  hydrationError: string;
+} {
+  return {
+    isHydrating: false,
+    alternativesLoading: false,
+    isConfirmed: false,
+    hydrationError:
+      errorMessage ||
+      "Could not verify medicine details from catalog. Please retry or search manually.",
+  };
+}
+
+export interface SafetyItemResultLike {
+  temp_id: string;
+  is_nti?: boolean;
+  is_schedule_h?: boolean;
+  safety_flags: SafetyFlag[];
+}
+
+/**
+ * Applies safety evaluation results (from POST /api/safety or offline fallback)
+ * onto review rows while strictly locking `selected_alternative_id` to null for NTI items.
+ */
+export function mergeSafetyEvaluationIntoRows<
+  T extends {
+    temp_id: string;
+    brand_name: string;
+    composition_display: string | null;
+    composition_key: string | null;
+    is_nti: boolean;
+    is_schedule_h: boolean;
+    safety_flags?: SafetyFlag[];
+    selected_alternative_id: string | null;
+  }
+>(rows: T[], evaluatedItems: SafetyItemResultLike[]): T[] {
+  const byTempId = new Map(evaluatedItems.map((it) => [it.temp_id, it]));
+  return rows.map((row) => {
+    const evalItem = byTempId.get(row.temp_id);
+    if (!evalItem) return row;
+
+    const merged = mergeRowClinicalSafetyFlags(evalItem.safety_flags, {
+      brand_name: row.brand_name,
+      composition_display: row.composition_display,
+      composition_key: row.composition_key,
+      is_nti: Boolean(evalItem.is_nti || row.is_nti),
+      is_schedule_h: Boolean(evalItem.is_schedule_h || row.is_schedule_h),
+    });
+
+    return {
+      ...row,
+      is_nti: merged.isNti,
+      is_schedule_h: merged.isScheduleH,
+      safety_flags: merged.safetyFlags,
+      selected_alternative_id: merged.isNti ? null : row.selected_alternative_id,
+    };
+  });
+}

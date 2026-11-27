@@ -14,12 +14,16 @@ import assert from "node:assert/strict";
 import {
   confirmedMedicinesToPlanItems,
   type ConfirmedMedicine,
+  type SafetyFlag,
 } from "../src/types/contracts";
 import {
   buildConfirmedMedicinesPayload,
+  buildHydrationFailurePatch,
   buildValidatedPlanRequest,
   isValidMedicineUuid,
   mergeRowClinicalSafetyFlags,
+  mergeSafetyEvaluationIntoRows,
+  shouldApplyHydrationResult,
   type ReviewHandoffRowInput,
 } from "../src/lib/clinical/review-handoff";
 import { DEMO_PRESCRIPTIONS } from "../src/lib/clinical/demo-cache";
@@ -273,4 +277,76 @@ test("End-to-end P2 pipeline: Demo Rx 2 -> Catalog Hydration -> Safety -> Confir
   assert.equal(planReq.items[0].allow_alternative, false);
   assert.equal(planReq.items[1].medicine_id, SHELCAL_500_UUID);
   assert.equal(planReq.items[1].is_nti, false);
+});
+
+test("hydration race guard, failure patch, and safety-merge helpers behave safely", () => {
+  const seqMap: Record<string, number> = { row_1: 1 };
+  assert.equal(shouldApplyHydrationResult(seqMap, "row_1", 1), true);
+
+  // Simulate user clicking "Change" or removing the row while fetch was in flight
+  seqMap.row_1 = 2;
+  assert.equal(shouldApplyHydrationResult(seqMap, "row_1", 1), false);
+
+  const failPatch = buildHydrationFailurePatch();
+  assert.equal(failPatch.isConfirmed, false);
+  assert.equal(failPatch.isHydrating, false);
+  assert.ok(failPatch.hydrationError.length > 0);
+
+  // Safety merge preserves allergy/interaction alerts and strips alternative on NTI
+  const updatedRows = mergeSafetyEvaluationIntoRows(
+    [
+      {
+        temp_id: "r1",
+        brand_name: "Thyrox 50 Tablet",
+        composition_display: "Thyroxine (50mcg)",
+        composition_key: "thyroxine (50mcg)",
+        is_nti: false,
+        is_schedule_h: false,
+        safety_flags: [] as SafetyFlag[],
+        selected_alternative_id: JAN_AUSHADHI_AMOX_UUID,
+      },
+      {
+        temp_id: "r2",
+        brand_name: "Dolo 650 Tablet",
+        composition_display: "Paracetamol (650mg)",
+        composition_key: "paracetamol (650mg)",
+        is_nti: false,
+        is_schedule_h: false,
+        safety_flags: [] as SafetyFlag[],
+        selected_alternative_id: null,
+      },
+    ],
+    [
+      {
+        temp_id: "r1",
+        is_nti: true,
+        is_schedule_h: true,
+        safety_flags: [
+          {
+            severity: "amber",
+            category: "nti_lock",
+            message: "NTI locked",
+            disclaimer: "Do not substitute.",
+          },
+        ],
+      },
+      {
+        temp_id: "r2",
+        is_nti: false,
+        is_schedule_h: false,
+        safety_flags: [
+          {
+            severity: "amber",
+            category: "interaction",
+            message: "Duplicate ingredient detected: paracetamol",
+            disclaimer: "Curated screening only.",
+          },
+        ],
+      },
+    ]
+  );
+
+  assert.equal(updatedRows[0].is_nti, true);
+  assert.equal(updatedRows[0].selected_alternative_id, null);
+  assert.ok(updatedRows[1].safety_flags?.some((f) => f.category === "interaction"));
 });
