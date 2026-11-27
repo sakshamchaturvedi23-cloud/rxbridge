@@ -4,7 +4,7 @@
  * src/app/(patient)/review/page.tsx
  *
  * Dedicated Prescription Review & Medicine Confirmation Page.
- * Wires into Part A medicine search and fuzzy matching.
+ * Wires into Part A medicine search, fuzzy matching, clinical safety flags, and P2->P3 handoff.
  *
  * Owner: P2 (AI Extraction, Clinical Rules & Data Owner)
  * Branch: p2-ai-data
@@ -12,7 +12,12 @@
 
 import React, { useState } from "react";
 import { PrescriptionReviewFlow } from "@/components/clinical/PrescriptionReviewFlow";
-import type { ExtractedMedicineItem, ConfirmedMedicine } from "@/types/contracts";
+import {
+  confirmedMedicinesToPlanItems,
+  type ConfirmedMedicine,
+  type ExtractedMedicineItem,
+} from "@/types/contracts";
+import { CLINICAL_DISCLAIMERS } from "@/lib/clinical/safety-check";
 import { CheckCircle2, ArrowLeft, FileText } from "lucide-react";
 import Link from "next/link";
 
@@ -20,28 +25,35 @@ const SAMPLE_DEMO_ITEMS: ExtractedMedicineItem[] = [
   {
     temp_id: "demo_item_1",
     raw_text: "Tab Augmentin 625 Duo",
-    matched_medicine_id: null,
-    brand_name: "Augmentin 625 Duo",
+    matched_medicine_id: "fa842009-26d5-4730-8ee1-c0bc4eea35e4",
+    brand_name: "Augmentin 625 Duo Tablet",
     composition_display: "Amoxycillin (500mg) + Clavulanic Acid (125mg)",
     composition_key: "amoxycillin (500mg)|clavulanic acid (125mg)",
     dose: "1 tablet twice daily after meals",
     duration: "5 days",
     confidence: "high",
     is_nti: false,
-    is_schedule_h: false,
+    is_schedule_h: true,
     allow_alternative: true,
-    safety_flags: [],
+    safety_flags: [
+      {
+        severity: "amber",
+        category: "schedule_h",
+        message: "Schedule H prescription drug. Valid prescription & pharmacist verification required.",
+        disclaimer: CLINICAL_DISCLAIMERS.schedule_h,
+      },
+    ],
     match_status: "auto_matched",
     suggestions: [
       {
-        medicine_id: "aug_625",
-        brand_name: "Augmentin 625 Duo",
+        medicine_id: "fa842009-26d5-4730-8ee1-c0bc4eea35e4",
+        brand_name: "Augmentin 625 Duo Tablet",
         composition_display: "Amoxycillin (500mg) + Clavulanic Acid (125mg)",
         similarity: 0.95,
       },
       {
-        medicine_id: "clavam_625",
-        brand_name: "Clavam 625",
+        medicine_id: "aeba45a6-a99f-4a3f-8e48-3e6a154988b8",
+        brand_name: "Mox CV 625 Tablet",
         composition_display: "Amoxycillin (500mg) + Clavulanic Acid (125mg)",
         similarity: 0.78,
       },
@@ -49,29 +61,36 @@ const SAMPLE_DEMO_ITEMS: ExtractedMedicineItem[] = [
   },
   {
     temp_id: "demo_item_2",
-    raw_text: "Tab Pan-D (unclear handwriting)",
+    raw_text: "Cap Pan-D (unclear handwriting)",
     matched_medicine_id: null,
-    brand_name: "Pan-D",
+    brand_name: "Pan-D Capsule PR",
     composition_display: "Domperidone (30mg) + Pantoprazole (40mg)",
     composition_key: "domperidone (30mg)|pantoprazole (40mg)",
     dose: "1 capsule empty stomach in morning",
     duration: "10 days",
     confidence: "amber",
     is_nti: false,
-    is_schedule_h: false,
+    is_schedule_h: true,
     allow_alternative: true,
-    safety_flags: [],
+    safety_flags: [
+      {
+        severity: "amber",
+        category: "schedule_h",
+        message: "Schedule H prescription drug. Valid prescription & pharmacist verification required.",
+        disclaimer: CLINICAL_DISCLAIMERS.schedule_h,
+      },
+    ],
     match_status: "needs_selection",
     suggestions: [
       {
-        medicine_id: "pand_brand",
-        brand_name: "Pan-D",
+        medicine_id: "2d79e6c0-db44-4d3a-9aec-b0a963b0827e",
+        brand_name: "Pan-D Capsule PR",
         composition_display: "Domperidone (30mg) + Pantoprazole (40mg)",
         similarity: 0.86,
       },
       {
-        medicine_id: "pantocid_dsr",
-        brand_name: "Pantocid DSR",
+        medicine_id: "d42264d4-3cf0-4494-9c17-9c13e20d24ce",
+        brand_name: "Pantocid DSR Capsule",
         composition_display: "Domperidone (30mg) + Pantoprazole (40mg)",
         similarity: 0.72,
       },
@@ -80,21 +99,34 @@ const SAMPLE_DEMO_ITEMS: ExtractedMedicineItem[] = [
   {
     temp_id: "demo_item_3",
     raw_text: "Tab ZEN 200",
-    matched_medicine_id: null,
+    matched_medicine_id: "1171f843-a7f6-4de8-9c6b-364b6ea145f7",
     brand_name: "ZEN 200 Tablet",
     composition_display: "Carbamazepine (200mg)",
     composition_key: "carbamazepine (200mg)",
     dose: "1 tablet at bedtime",
     duration: "30 days",
     confidence: "high",
-    is_nti: true, // NTI lock test
+    is_nti: true,
     is_schedule_h: true,
     allow_alternative: false,
-    safety_flags: [],
+    safety_flags: [
+      {
+        severity: "amber",
+        category: "nti_lock",
+        message: "Narrow Therapeutic Index medicine (carbamazepine) detected. Brand substitution is clinically locked.",
+        disclaimer: CLINICAL_DISCLAIMERS.nti_lock,
+      },
+      {
+        severity: "amber",
+        category: "schedule_h",
+        message: "Schedule H prescription drug. Valid prescription & pharmacist verification required.",
+        disclaimer: CLINICAL_DISCLAIMERS.schedule_h,
+      },
+    ],
     match_status: "auto_matched",
     suggestions: [
       {
-        medicine_id: "zen_200",
+        medicine_id: "1171f843-a7f6-4de8-9c6b-364b6ea145f7",
         brand_name: "ZEN 200 Tablet",
         composition_display: "Carbamazepine (200mg)",
         similarity: 0.98,
@@ -109,6 +141,10 @@ export default function ReviewPage() {
   const handleContinueToPlan = (medicines: ConfirmedMedicine[]) => {
     setConfirmedPayload(medicines);
   };
+
+  const planItems = confirmedPayload
+    ? confirmedMedicinesToPlanItems(confirmedPayload)
+    : [];
 
   return (
     <div className="min-h-screen bg-slate-50/60 py-8 px-4 sm:px-6 lg:px-8">
@@ -138,7 +174,7 @@ export default function ReviewPage() {
                   Prescription Verified & Ready for Pharmacy Optimization
                 </h2>
                 <p className="text-sm text-slate-600">
-                  {confirmedPayload.length} medicine(s) successfully verified with clinical safety checks.
+                  {confirmedPayload.length} medicine(s) verified with valid catalog UUIDs and clinical safety checks.
                 </p>
               </div>
             </div>
@@ -155,6 +191,10 @@ export default function ReviewPage() {
                     )}
                     <div className="text-xs text-slate-500 mt-0.5">
                       Salt: {med.composition_key} {med.dosage ? `• ${med.dosage}` : ""}
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                      Plan medicine_id: {planItems[idx]?.medicine_id} • allow_alternative:{" "}
+                      {String(planItems[idx]?.allow_alternative)}
                     </div>
                   </div>
                   <div className="text-right">
@@ -185,7 +225,7 @@ export default function ReviewPage() {
                 className="rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-md hover:bg-emerald-700 cursor-pointer"
                 onClick={() => {
                   alert(
-                    `Handoff payload ready for P3 /api/plans with ${confirmedPayload.length} items!`
+                    `Handoff payload ready for P3 /api/plans with ${planItems.length} validated items!`
                   );
                 }}
               >

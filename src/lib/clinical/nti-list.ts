@@ -42,32 +42,59 @@ function escapeRegex(str: string): string {
 }
 
 /**
- * Checks if a given medicine composition contains any Narrow Therapeutic Index (NTI) salt.
- * Uses extractSaltNames for token isolation and word-boundary matching to prevent false positives.
+ * Returns the matched canonical NTI salt names for a given composition string (empty if non-NTI).
  */
-export function isNtiComposition(compositionDisplay: string): boolean {
+export function getMatchedNtiSalts(compositionDisplay: string): string[] {
   if (!compositionDisplay || typeof compositionDisplay !== "string") {
-    return false;
+    return [];
   }
 
   const salts = extractSaltNames(compositionDisplay);
   if (salts.length === 0) {
-    return false;
+    return [];
   }
 
-  return salts.some((salt) =>
-    NTI_SALTS.some((nti) => {
-      // Handle standard clinical synonyms/variants (e.g., thyroxine for levothyroxine, ciclosporin for cyclosporine)
+  const matched = new Set<string>();
+  for (const salt of salts) {
+    for (const nti of NTI_SALTS) {
       if (nti === "levothyroxine") {
-        return /\b(?:levo)?thyroxine\b/i.test(salt);
+        if (/\b(?:levo)?thyroxine\b/i.test(salt)) {
+          matched.add(nti);
+        }
+      } else if (nti === "cyclosporine") {
+        if (/\b(?:cyclosporin[e]?|ciclosporin[e]?)\b/i.test(salt)) {
+          matched.add(nti);
+        }
+      } else if (nti === "phenobarbital") {
+        if (/\bphenobarbit(?:al|one)\b/i.test(salt)) {
+          matched.add(nti);
+        }
+      } else if (nti === "acenocoumarol") {
+        if (/\b(?:acenocoumarol|nicoumalone)\b/i.test(salt)) {
+          matched.add(nti);
+        }
+      } else if (nti === "sodium valproate" || nti === "valproic acid") {
+        if (/\b(?:sodium\s+valproate|valproic\s+acid|divalproex)\b/i.test(salt)) {
+          matched.add(nti);
+        }
+      } else {
+        const regex = new RegExp(`\\b${escapeRegex(nti)}\\b`, "i");
+        if (regex.test(salt)) {
+          matched.add(nti);
+        }
       }
-      if (nti === "cyclosporine") {
-        return /\b(?:cyclosporin[e]?|ciclosporin[e]?)\b/i.test(salt);
-      }
-      const regex = new RegExp(`\\b${escapeRegex(nti)}\\b`, "i");
-      return regex.test(salt);
-    })
-  );
+    }
+  }
+
+  return Array.from(matched);
+}
+
+/**
+ * Checks if a given medicine composition contains any Narrow Therapeutic Index (NTI) salt.
+ * Uses extractSaltNames for token isolation and word-boundary matching to prevent false positives.
+ */
+export function isNtiComposition(compositionDisplay: string): boolean {
+  return getMatchedNtiSalts(compositionDisplay).length > 0;
 }
 
 /**
@@ -90,6 +117,8 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   // Antibiotics & Antimicrobials (Schedule H & H1)
   "amoxicillin",
   "ampicillin",
+  "cloxacillin",
+  "dicloxacillin",
   "azithromycin",
   "cefixime",
   "cefuroxime",
@@ -103,6 +132,7 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "levofloxacin",
   "norfloxacin",
   "moxifloxacin",
+  "gatifloxacin",
   "doxycycline",
   "metronidazole",
   "tinidazole",
@@ -131,16 +161,26 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "isoniazid",
   "pyrazinamide",
   "ethambutol",
+  "itraconazole",
+  "fluconazole",
+  "voriconazole",
+  "terbinafine",
+  "albendazole",
+  "ivermectin",
 
-  // Antihypertensives & Cardiovascular Drugs
+  // Antihypertensives, Antiplatelets & Cardiovascular Drugs
   "telmisartan",
   "amlodipine",
   "cilnidipine",
   "benidipine",
+  "nifedipine",
+  "felodipine",
   "olmesartan",
   "losartan",
   "valsartan",
   "candesartan",
+  "irbesartan",
+  "azilsartan",
   "metoprolol",
   "atenolol",
   "bisoprolol",
@@ -155,17 +195,27 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "diltiazem",
   "verapamil",
   "clonidine",
+  "moxonidine",
+  "methyldopa",
+  "hydralazine",
   "prazosin",
   "spironolactone",
+  "eplerenone",
   "furosemide",
   "torsemide",
   "hydrochlorothiazide",
   "chlorthalidone",
   "indapamide",
+  "metolazone",
   "nicorandil",
   "ivabradine",
+  "ranolazine",
   "nitroglycerin",
   "isosorbide",
+  "clopidogrel",
+  "prasugrel",
+  "ticagrelor",
+  "warfarin",
 
   // Antidiabetics (Oral Hypoglycemics & Insulins)
   "metformin",
@@ -203,8 +253,9 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "lansoprazole",
   "ilaprazole",
   "dexrabeprazole",
+  "dicyclomine",
 
-  // Corticosteroids
+  // Corticosteroids & Hormones
   "prednisolone",
   "methylprednisolone",
   "dexamethasone",
@@ -217,6 +268,7 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "triamcinolone",
   "clobetasol",
   "beclomethasone",
+  "progesterone",
 
   // CNS, Psychotropics & Neurological (Sedatives, Antidepressants, Anticonvulsants)
   "alprazolam",
@@ -237,11 +289,14 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "amitriptyline",
   "nortriptyline",
   "mirtazapine",
+  "trazodone",
   "pregabalin",
   "gabapentin",
   "levetiracetam",
+  "oxcarbazepine",
   "lamotrigine",
   "topiramate",
+  "piracetam",
   "baclofen",
   "tramadol",
   "tapentadol",
@@ -251,10 +306,21 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "quetiapine",
   "risperidone",
   "aripiprazole",
+  "donepezil",
+  "memantine",
+  "amantadine",
+  "pramipexole",
+  "ropinirole",
+  "levodopa",
+  "carbidopa",
+  "cabergoline",
+  "bromocriptine",
+  "betahistine",
 
-  // Prescription NSAIDs & Anti-inflammatories
+  // Prescription NSAIDs, Muscle Relaxants & Anti-inflammatories
   "aceclofenac",
   "diclofenac",
+  "etodolac",
   "piroxicam",
   "meloxicam",
   "ketorolac",
@@ -265,9 +331,16 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "serratiopeptidase",
   "chymotrypsin",
   "mefenamic",
+  "thiocolchicoside",
+  "chlorzoxazone",
 
   // Respiratory Rx & Misc Schedule H
   "montelukast",
+  "formoterol",
+  "salmeterol",
+  "salbutamol",
+  "levosalbutamol",
+  "acebrophylline",
   "tamsulosin",
   "alfuzosin",
   "silodosin",
@@ -282,7 +355,39 @@ const SCHEDULE_H_KEYWORDS: readonly string[] = [
   "domperidone",
   "itopride",
   "levosulpiride",
+  "febuxostat",
+  "allopurinol",
+  "colchicine",
+  "isotretinoin",
+  "azelastine",
+  "olopatadine",
 ] as const;
+
+/**
+ * Returns the matched Schedule H keywords for a given composition string (empty if non-Schedule H).
+ */
+export function getMatchedScheduleHSalts(compositionDisplay: string): string[] {
+  if (!compositionDisplay || typeof compositionDisplay !== "string") {
+    return [];
+  }
+
+  const salts = extractSaltNames(compositionDisplay);
+  if (salts.length === 0) {
+    return [];
+  }
+
+  const matched = new Set<string>();
+  for (const salt of salts) {
+    for (const keyword of SCHEDULE_H_KEYWORDS) {
+      const regex = new RegExp(`\\b${escapeRegex(keyword)}\\b`, "i");
+      if (regex.test(salt)) {
+        matched.add(keyword);
+      }
+    }
+  }
+
+  return Array.from(matched);
+}
 
 /**
  * Determines whether a composition requires a valid prescription under Indian Schedule H / H1 regulations.
@@ -304,16 +409,5 @@ export function isScheduleHComposition(compositionDisplay: string): boolean {
     return true;
   }
 
-  const salts = extractSaltNames(compositionDisplay);
-  if (salts.length === 0) {
-    return false;
-  }
-
-  // 2. Check each extracted salt name against the Schedule H keyword list using word boundaries
-  return salts.some((salt) =>
-    SCHEDULE_H_KEYWORDS.some((keyword) => {
-      const regex = new RegExp(`\\b${escapeRegex(keyword)}\\b`, "i");
-      return regex.test(salt);
-    })
-  );
+  return getMatchedScheduleHSalts(compositionDisplay).length > 0;
 }

@@ -4,25 +4,43 @@
  * POST /api/medicines/alias
  *
  * Auto-Learning Hook:
- * Persists patient/user confirmed OCR correction mapping (raw_ocr_text -> medicine_id)
+ * Persists authenticated user OCR correction mappings (raw_ocr_text -> medicine_id)
  * into Supabase `ocr_aliases` to continuously improve handwriting OCR recognition.
  *
+ * Security & Integrity:
+ * - Requires authenticated session via `createClient()` (`supabase.auth.getUser()`).
+ * - Verifies `matched_medicine_id` exists in `medicines`.
+ * - Normalizes `raw_text` and refuses conflicting overwrites (returns 409 Conflict)
+ *   if `raw_text` is already mapped to a different `matched_medicine_id`.
+ *
  * Owner: P2 (AI Extraction, Clinical Rules & Data Owner)
- * Branch: p2-ai-data
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { createAdminClient } from "@/lib/supabase/server";
+import { createAdminClient, createClient } from "@/lib/supabase/server";
+import { normalizeAliasRawText } from "@/lib/clinical/alias-learning";
 
 const aliasPayloadSchema = z.object({
-  raw_text: z.string().min(2, "Raw text must be at least 2 characters"),
+  raw_text: z.string().trim().min(2, "Raw text must be at least 2 characters").max(160),
   matched_medicine_id: z.string().uuid("Invalid matched_medicine_id UUID"),
 });
 
 export async function POST(request: NextRequest) {
   try {
-    const json = await request.json();
+    // 1. Authenticate caller via cookie-based Supabase client
+    const userClient = await createClient();
+    const {
+      data: { user },
+      error: authError,
+    } = await userClient.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // 2. Validate payload
+    const json = await request.json().catch(() => null);
     const parsed = aliasPayloadSchema.safeParse(json);
 
     if (!parsed.success) {
@@ -33,15 +51,42 @@ export async function POST(request: NextRequest) {
     }
 
     const { raw_text, matched_medicine_id } = parsed.data;
-    const cleanRawText = raw_text.trim().toLowerCase();
+    const cleanRawText = normalizeAliasRawText(raw_text);
 
-    // Use admin client to write to ocr_aliases safely server-side
-    const supabase = createAdminClient();
+    if (cleanRawText.length < 2) {
+      return NextResponse.json(
+        { error: "Normalized raw_text must be at least 2 characters" },
+        { status: 400 }
+      );
+    }
 
-    // Check if the alias already exists to increment correction_count
-    const { data: existing, error: checkError } = await supabase
+    // 3. Verify target medicine exists (using authenticated RLS client)
+    const { data: targetMedicine, error: medError } = await userClient
+      .from("medicines")
+      .select("id, brand_name")
+      .eq("id", matched_medicine_id)
+      .maybeSingle();
+
+    if (medError) {
+      return NextResponse.json(
+        { error: `Failed to verify target medicine: ${medError.message}` },
+        { status: 500 }
+      );
+    }
+
+    if (!targetMedicine) {
+      return NextResponse.json(
+        { error: "Target medicine not found for matched_medicine_id" },
+        { status: 404 }
+      );
+    }
+
+    // 4. Use admin client strictly for authorized server-side write to `ocr_aliases`
+    const adminSupabase = createAdminClient();
+
+    const { data: existing, error: checkError } = await adminSupabase
       .from("ocr_aliases")
-      .select("id, correction_count")
+      .select("id, matched_medicine_id, correction_count")
       .eq("raw_text", cleanRawText)
       .maybeSingle();
 
@@ -53,10 +98,22 @@ export async function POST(request: NextRequest) {
     }
 
     if (existing) {
-      const { error: updateError } = await supabase
+      // Guard against conflicting overwrites of an existing alias mapping
+      if (existing.matched_medicine_id !== matched_medicine_id) {
+        return NextResponse.json(
+          {
+            error: "Conflicting OCR alias already mapped to a different medicine",
+            conflict: true,
+            raw_text: cleanRawText,
+            existing_medicine_id: existing.matched_medicine_id,
+          },
+          { status: 409 }
+        );
+      }
+
+      const { error: updateError } = await adminSupabase
         .from("ocr_aliases")
         .update({
-          matched_medicine_id,
           correction_count: (existing.correction_count || 1) + 1,
           updated_at: new Date().toISOString(),
         })
@@ -69,7 +126,7 @@ export async function POST(request: NextRequest) {
         );
       }
     } else {
-      const { error: insertError } = await supabase.from("ocr_aliases").insert({
+      const { error: insertError } = await adminSupabase.from("ocr_aliases").insert({
         raw_text: cleanRawText,
         matched_medicine_id,
         correction_count: 1,

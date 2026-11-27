@@ -58,7 +58,10 @@ export async function GET(request: NextRequest) {
     const limitParam = searchParams.get("limit");
 
     const enforceNtiLock = enforceNtiParam !== "false";
-    const limit = limitParam ? Number.parseInt(limitParam, 10) : 20;
+    const parsedLimit = limitParam ? Number.parseInt(limitParam, 10) : 20;
+    const limit = Number.isNaN(parsedLimit)
+      ? 20
+      : Math.min(Math.max(parsedLimit, 1), 50);
 
     if (!qParam && !medicineIdParam) {
       return NextResponse.json(
@@ -97,7 +100,7 @@ export async function GET(request: NextRequest) {
     // 4. Process q if provided (Mode: Type-ahead search)
     if (qParam) {
       const searchResults = await searchMedicines(supabase, qParam, {
-        limit: Number.isNaN(limit) ? 20 : limit,
+        limit,
       });
       response.medicines = searchResults;
     }
