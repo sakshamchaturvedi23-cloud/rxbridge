@@ -57,12 +57,57 @@ export function buildCompositionKey(compositionDisplay: string): string {
 }
 
 /**
+ * Canonical spelling map for common Indian/British vs INN/USAN salt variants.
+ * Used for deterministic salt matching across NTI, Schedule H, and clinical safety checks.
+ */
+export const CANONICAL_SALT_SYNONYMS: Readonly<Record<string, string>> = {
+  amoxycillin: "amoxicillin",
+  cefalexin: "cephalexin",
+  beclometasone: "beclomethasone",
+  torasemide: "torsemide",
+  phenobarbitone: "phenobarbital",
+  frusemide: "furosemide",
+  ciclosporin: "cyclosporine",
+  cyclosporin: "cyclosporine",
+  nicoumalone: "acenocoumarol",
+  lignocaine: "lidocaine",
+  acetaminophen: "paracetamol",
+  albuterol: "salbutamol",
+  glyburide: "glibenclamide",
+  "sodium valproate": "sodium valproate",
+  "thyroxine": "levothyroxine",
+  "thyroxine sodium": "levothyroxine sodium",
+};
+
+/**
+ * Normalizes known British/Indian/INN salt spelling variants within a clean lowercase salt string.
+ * Preserves multi-salt words (e.g. "amoxycillin" -> "amoxicillin", "torasemide" -> "torsemide").
+ */
+export function normalizeSaltSpelling(salt: string): string {
+  if (!salt || typeof salt !== "string") return "";
+
+  let normalized = salt.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+
+  if (CANONICAL_SALT_SYNONYMS[normalized]) {
+    return CANONICAL_SALT_SYNONYMS[normalized];
+  }
+
+  for (const [variant, canonical] of Object.entries(CANONICAL_SALT_SYNONYMS)) {
+    const regex = new RegExp(`\\b${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
+    normalized = normalized.replace(regex, canonical);
+  }
+
+  return normalized.replace(/\s+/g, " ").trim();
+}
+
+/**
  * Extracts clean, lowercase active pharmaceutical ingredient (salt) names from a composition string,
- * stripping dosages, units, release profiles, and parentheses.
- * Designed for clinical classification matching (NTI list and Schedule H verification).
+ * stripping dosages, units, release profiles, and parentheses, and normalizing common spelling variants.
+ * Designed for clinical classification matching (NTI list, Schedule H verification, and safety checks).
  *
  * Example:
- * "Amoxicillin 500mg IP + Clavulanic Acid 125mg" -> ["amoxicillin", "clavulanic acid"]
+ * "Amoxycillin 500mg IP + Clavulanic Acid 125mg" -> ["amoxicillin", "clavulanic acid"]
  */
 export function extractSaltNames(compositionDisplay: string): string[] {
   if (!compositionDisplay || typeof compositionDisplay !== "string") {
@@ -70,7 +115,7 @@ export function extractSaltNames(compositionDisplay: string): string[] {
   }
 
   return compositionDisplay
-    .split("+")
+    .split(/[+|]/)
     .map((rawToken) => {
       // 1. Remove parentheses
       let token = rawToken.replace(/[()]/g, " ");
@@ -78,20 +123,23 @@ export function extractSaltNames(compositionDisplay: string): string[] {
       // 2. Strip pharmacopeia notations (IP, BP, USP)
       token = token.replace(/\b(?:i\.?p\.?|b\.?p\.?|u\.?s\.?p\.?)\.?\b/gi, " ");
 
-      // 3. Strip dosages with units (e.g. 500mg, 125 mg, 0.5 mcg, 10%, 5ml, 60000 IU, 5 billion spores)
+      // 3. Strip placeholder/unknown strength markers like NA
+      token = token.replace(/\bna\b/gi, " ");
+
+      // 4. Strip dosages with units (e.g. 500mg, 125 mg, 0.5 mcg, 10%, 5ml, 60000 IU, 5 billion spores)
       token = token.replace(
         /\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|ug|g|gm|gms|ml|iu|%|tablets?|capsules?|units?|billion|million|spores?|w\/v|w\/w|v\/v)?(?![a-z])/gi,
         " "
       );
 
-      // 4. Strip release mechanisms if present (SR, ER, PR, CR, XR, XL, IR)
+      // 5. Strip release mechanisms if present (SR, ER, PR, CR, XR, XL, IR)
       token = token.replace(/\b(?:sr|er|pr|cr|xr|xl|ir)\b/gi, " ");
 
-      // 5. Strip any remaining numbers, punctuation, slashes, percent
+      // 6. Strip any remaining numbers, punctuation, slashes, percent
       token = token.replace(/[%/]/g, " ");
       token = token.replace(/\b\d+(?:\.\d+)?\b/g, " ");
 
-      // 6. Lowercase, normalize hyphens to spaces, strip special characters, and collapse spaces
+      // 7. Lowercase, normalize hyphens to spaces, strip special characters, and collapse spaces
       token = token
         .toLowerCase()
         .replace(/[^a-z\s-]/g, " ")
@@ -99,7 +147,7 @@ export function extractSaltNames(compositionDisplay: string): string[] {
         .replace(/\s+/g, " ")
         .trim();
 
-      return token;
+      return normalizeSaltSpelling(token);
     })
     .filter((token) => token.length > 0);
 }

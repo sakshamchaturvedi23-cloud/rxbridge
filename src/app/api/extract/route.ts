@@ -6,13 +6,13 @@ import { buildCompositionKey } from "@/lib/clinical/normalize";
 import { isNtiComposition, isScheduleHComposition } from "@/lib/clinical/nti-list";
 import { findDemoPrescriptionCache, toDemoExtractResponse } from "@/lib/clinical/demo-cache";
 import { findFuzzyMedicineMatches, type CandidateMedicine } from "@/lib/clinical/fuzzy-match";
+import { evaluatePrescriptionSafety } from "@/lib/clinical/safety-check";
 import type {
   ConfidenceLevel,
   ExtractResponse,
   ExtractedMedicineItem,
   MedicineMatchStatus,
   MedicineSuggestion,
-  SafetyFlag,
 } from "@/types/contracts";
 import type { Json } from "@/types/database.types";
 
@@ -120,14 +120,19 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Fetch patient profile for name trust checks
+  // Fetch patient profile for name trust checks and clinical safety evaluation
   const { data: profile } = await supabase
     .from("profiles")
-    .select("full_name")
+    .select("full_name, allergies, chronic_conditions, current_meds")
     .eq("id", user.id)
-    .single();
+    .maybeSingle();
 
   const userFullName = profile?.full_name?.trim() || "";
+  const patientSafetyProfile = {
+    allergies: profile?.allergies ?? [],
+    chronic_conditions: profile?.chronic_conditions ?? [],
+    current_meds: profile?.current_meds ?? [],
+  };
 
   // 4. Duplicate check against existing prescriptions for this user
   let isDuplicate = false;
@@ -168,13 +173,30 @@ export async function POST(request: NextRequest) {
     const patientNameMatch = checkPatientNameMatch(userFullName, matchedDemo.patient_name);
     const dateValid = checkDateValid(matchedDemo.prescription_date) ?? matchedDemo.trust_checks.date_valid;
 
+    // Evaluate clinical safety (NTI lock, Schedule H, allergies, chronic conditions, interactions)
+    const demoSafetyReport = evaluatePrescriptionSafety(
+      matchedDemo.items.map((item) => ({
+        temp_id: item.temp_id,
+        medicine_id: item.matched_medicine_id,
+        brand_name: item.brand_name,
+        composition_display: item.composition_display,
+        composition_key: item.composition_key,
+        is_nti: item.is_nti,
+        is_schedule_h: item.is_schedule_h,
+      })),
+      patientSafetyProfile
+    );
+
     // Ensure all NTI items strictly keep allow_alternative: false
-    const demoItems: ExtractedMedicineItem[] = matchedDemo.items.map((item) => {
-      const isNti = item.is_nti || isNtiComposition(item.composition_display || item.brand_name);
+    const demoItems: ExtractedMedicineItem[] = matchedDemo.items.map((item, idx) => {
+      const safetyEval = demoSafetyReport.items[idx];
+      const isNti = Boolean(safetyEval?.is_nti || item.is_nti);
       return {
         ...item,
         is_nti: isNti,
+        is_schedule_h: Boolean(safetyEval?.is_schedule_h || item.is_schedule_h),
         allow_alternative: isNti ? false : item.allow_alternative,
+        safety_flags: safetyEval?.safety_flags ?? item.safety_flags,
       };
     });
 
@@ -505,24 +527,6 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
     // Strictly enforce NTI Do-Not-Substitute lock
     const allowAlternative = isNti ? false : true;
 
-    const safetyFlags: SafetyFlag[] = [];
-    if (isNti) {
-      safetyFlags.push({
-        severity: "amber",
-        category: "nti_lock",
-        message: "Narrow Therapeutic Index medicine detected. Brand substitution is locked.",
-        disclaimer: "Narrow Therapeutic Index: do not substitute without doctor approval.",
-      });
-    }
-    if (isScheduleH) {
-      safetyFlags.push({
-        severity: "amber",
-        category: "schedule_h",
-        message: "Schedule H prescription drug. Requires pharmacist verification.",
-        disclaimer: "Prescription required by law before dispensing.",
-      });
-    }
-
     items.push({
       temp_id: `item-${i + 1}`,
       raw_text: rawText,
@@ -536,10 +540,34 @@ Do not hallucinate medicines that are not clearly visible. Always output pure JS
       is_nti: isNti,
       is_schedule_h: isScheduleH,
       allow_alternative: allowAlternative,
-      safety_flags: safetyFlags,
+      safety_flags: [],
       match_status: matchStatus,
       suggestions,
     });
+  }
+
+  // Evaluate clinical safety across all extracted items (NTI, Schedule H, allergies, conditions, interactions)
+  const safetyReport = evaluatePrescriptionSafety(
+    items.map((item) => ({
+      temp_id: item.temp_id,
+      medicine_id: item.matched_medicine_id,
+      brand_name: item.brand_name,
+      composition_display: item.composition_display,
+      composition_key: item.composition_key,
+      is_nti: item.is_nti,
+      is_schedule_h: item.is_schedule_h,
+    })),
+    patientSafetyProfile
+  );
+
+  for (let i = 0; i < items.length; i++) {
+    const evalResult = safetyReport.items[i];
+    if (evalResult) {
+      items[i].is_nti = evalResult.is_nti;
+      items[i].is_schedule_h = evalResult.is_schedule_h;
+      items[i].allow_alternative = evalResult.is_nti ? false : items[i].allow_alternative;
+      items[i].safety_flags = evalResult.safety_flags;
+    }
   }
 
   const trustChecks = {
