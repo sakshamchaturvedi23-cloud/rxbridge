@@ -4,10 +4,12 @@
  * src/components/clinical/MedicineReviewRow.tsx
  *
  * Single medicine review card enforcing:
- * 1. "Right Medicine First": Verifies/confirms the prescribed drug before unlocking alternatives.
- * 2. Fuzzy suggestion pills and type-ahead catalog search.
- * 3. Unlocks Lower-Price and Jan Aushadhi options upon confirmation.
- * 4. Strict NTI (Do-Not-Substitute) clinical warning banner.
+ * 1. "Right Medicine First": Verifies/confirms the prescribed drug (and hydrates authoritative
+ *    metadata before confirming fuzzy suggestions) before unlocking alternatives.
+ * 2. Renders clinical `safety_flags` (allergy, condition, interaction, NTI lock, Schedule H)
+ *    with mandatory decision-support disclaimers.
+ * 3. Displays Jan Aushadhi & lower-cost same-salt proposals with pack-size and unit-price context.
+ * 4. Strict NTI (Do-Not-Substitute) clinical lock banner.
  *
  * Owner: P2 (AI Extraction, Clinical Rules & Data Owner)
  * Branch: p2-ai-data
@@ -30,11 +32,13 @@ import {
 import type {
   MedicineMatchStatus,
   MedicineSuggestion,
+  SafetyFlag,
 } from "@/types/contracts";
 import type {
   MedicineSearchItem,
   SameSaltAlternativesGroup,
 } from "@/lib/clinical/medicine-search";
+import { isValidMedicineUuid } from "@/lib/clinical/review-handoff";
 
 export interface ReviewRowState {
   temp_id: string;
@@ -54,13 +58,15 @@ export interface ReviewRowState {
   is_jan_aushadhi: boolean;
   is_nti: boolean;
   is_schedule_h: boolean;
+  safety_flags?: SafetyFlag[];
 
   // Custom medicine flag
   is_custom: boolean;
   custom_strength?: string;
 
-  // Confirmation state
+  // Confirmation & hydration state
   isConfirmed: boolean;
+  isHydrating?: boolean;
 
   // Unlocked alternatives
   alternativesLoading: boolean;
@@ -76,6 +82,14 @@ interface MedicineReviewRowProps {
   onUpdateMedicine: (rowId: string, updated: Partial<ReviewRowState>) => void;
   onRemoveRow: (rowId: string) => void;
 }
+
+const FLAG_CATEGORY_LABELS: Record<SafetyFlag["category"], string> = {
+  allergy: "Allergy Alert",
+  condition: "Condition Precaution",
+  interaction: "Interaction Warning",
+  nti_lock: "NTI Lock",
+  schedule_h: "Schedule H",
+};
 
 export function MedicineReviewRow({
   row,
@@ -93,6 +107,9 @@ export function MedicineReviewRow({
   const [isCustomMode, setIsCustomMode] = useState(false);
   const [customName, setCustomName] = useState(row.brand_name || "");
   const [customStrength, setCustomStrength] = useState(row.custom_strength || "");
+
+  const hasValidCatalogUuid =
+    !row.is_custom && isValidMedicineUuid(row.matched_medicine_id);
 
   // Debounced search for catalog
   const handleCatalogSearch = async (query: string) => {
@@ -118,13 +135,14 @@ export function MedicineReviewRow({
     }
   };
 
-  // Select a suggestion or catalog match
+  // Select a suggestion or catalog match (defers final confirmation for partial suggestions until hydrated)
   const handleSelectMedicine = (med: MedicineSearchItem | MedicineSuggestion) => {
     const isFullMed = "composition_key" in med;
     const brand = med.brand_name;
     const compDisplay = med.composition_display;
     const compKey = isFullMed ? med.composition_key : null;
-    const mrp = isFullMed ? med.mrp : row.mrp || 0;
+    const mrp = isFullMed ? med.mrp : 0;
+    const isJanAushadhi = isFullMed ? med.is_jan_aushadhi : false;
     const isNti = isFullMed ? med.is_nti : row.is_nti;
     const isScheduleH = isFullMed ? med.is_schedule_h : row.is_schedule_h;
     const medId = "medicine_id" in med ? med.medicine_id : med.id;
@@ -136,10 +154,13 @@ export function MedicineReviewRow({
       composition_display: compDisplay,
       composition_key: compKey,
       mrp,
+      is_jan_aushadhi: isJanAushadhi,
       is_nti: isNti,
       is_schedule_h: isScheduleH,
       is_custom: false,
-      isConfirmed: true,
+      isConfirmed: isFullMed, // Partial fuzzy suggestions wait for hydration in onConfirmRow
+      isHydrating: !isFullMed,
+      selected_alternative_id: null,
       alternativesLoading: false,
     };
 
@@ -148,7 +169,7 @@ export function MedicineReviewRow({
     onConfirmRow(updatedRow);
   };
 
-  // Handle custom medicine confirmation
+  // Handle custom medicine confirmation (explicitly marked is_custom so non-UUID never leaks to /api/plans)
   const handleConfirmCustom = () => {
     if (!customName.trim()) return;
 
@@ -162,6 +183,8 @@ export function MedicineReviewRow({
       is_custom: true,
       custom_strength: customStrength.trim() || undefined,
       isConfirmed: true,
+      isHydrating: false,
+      selected_alternative_id: null,
       alternativesGroup: null,
     };
 
@@ -169,6 +192,12 @@ export function MedicineReviewRow({
     setIsSearchingCatalog(false);
     onConfirmRow(updatedRow);
   };
+
+  // Render clinical flags (allergy/condition/interaction always shown; schedule_h shown; nti_lock shown when not yet confirmed banner)
+  const visibleSafetyFlags = (row.safety_flags ?? []).filter((flag) => {
+    if (flag.category === "nti_lock" && row.isConfirmed && row.is_nti) return false;
+    return true;
+  });
 
   // Determine active alternative
   const chosenAltId = row.selected_alternative_id;
@@ -199,7 +228,9 @@ export function MedicineReviewRow({
                   : "bg-slate-100 text-slate-700"
               }`}
             >
-              {row.isConfirmed ? (
+              {row.isHydrating ? (
+                <RefreshCw className="h-5 w-5 animate-spin" />
+              ) : row.isConfirmed ? (
                 <CheckCircle2 className="h-5 w-5" />
               ) : (
                 <Pill className="h-5 w-5" />
@@ -213,7 +244,11 @@ export function MedicineReviewRow({
                 </h3>
 
                 {/* Status Badges */}
-                {row.isConfirmed ? (
+                {row.isHydrating ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 border border-sky-200">
+                    <RefreshCw className="h-3 w-3 animate-spin" /> Verifying Safety...
+                  </span>
+                ) : row.isConfirmed ? (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
                     <CheckCircle2 className="h-3 w-3" /> Confirmed
                   </span>
@@ -228,6 +263,12 @@ export function MedicineReviewRow({
                 ) : (
                   <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
                     Manual Selection
+                  </span>
+                )}
+
+                {row.is_custom && (
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 border border-slate-300">
+                    Custom (Unlinked)
                   </span>
                 )}
 
@@ -290,8 +331,18 @@ export function MedicineReviewRow({
             ) : (
               <button
                 type="button"
+                disabled={row.isHydrating || !hasValidCatalogUuid}
                 onClick={() => onConfirmRow(row)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 transition-colors"
+                title={
+                  !hasValidCatalogUuid
+                    ? "Select a catalog match or enter custom medicine below first"
+                    : "Confirm medicine"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold shadow-xs transition-colors ${
+                  row.isHydrating || !hasValidCatalogUuid
+                    ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+                    : "bg-emerald-600 text-white hover:bg-emerald-700"
+                }`}
               >
                 <CheckCircle2 className="h-3.5 w-3.5" /> Confirm Medicine
               </button>
@@ -308,9 +359,51 @@ export function MedicineReviewRow({
           </div>
         </div>
 
+        {/* ----------------- Clinical Safety Flags Banner ----------------- */}
+        {visibleSafetyFlags.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {visibleSafetyFlags.map((flag, idx) => {
+              const isRed = flag.severity === "red";
+              return (
+                <div
+                  key={`${flag.category}-${idx}`}
+                  className={`rounded-lg border px-3 py-2.5 text-xs ${
+                    isRed
+                      ? "border-rose-300 bg-rose-50 text-rose-950"
+                      : "border-amber-200 bg-amber-50/80 text-amber-950"
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    {isRed ? (
+                      <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="space-y-0.5">
+                      <div className="font-semibold">
+                        <span className="uppercase tracking-wide text-[10px] mr-1.5 opacity-80">
+                          [{FLAG_CATEGORY_LABELS[flag.category]}]
+                        </span>
+                        {flag.message}
+                      </div>
+                      <div className="text-[11px] opacity-80">{flag.disclaimer}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* ----------------- State A: UNCONFIRMED Resolution Flow ----------------- */}
         {!row.isConfirmed && (
           <div className="mt-4 border-t border-slate-200/70 pt-4 space-y-3">
+            {!hasValidCatalogUuid && !row.isHydrating && (
+              <div className="rounded-lg border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs text-sky-900">
+                Select a matched medicine below or search the catalog so we can verify clinical safety and pharmacy pricing.
+              </div>
+            )}
+
             {/* 1. Fuzzy suggestions if available */}
             {row.suggestions && row.suggestions.length > 0 && !isSearchingCatalog && !isCustomMode && (
               <div>
@@ -323,8 +416,9 @@ export function MedicineReviewRow({
                     <button
                       key={sug.medicine_id}
                       type="button"
+                      disabled={row.isHydrating}
                       onClick={() => handleSelectMedicine(sug)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 hover:border-amber-300 transition-all text-left"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 hover:border-amber-300 transition-all text-left disabled:opacity-50"
                     >
                       <span>{sug.brand_name}</span>
                       <span className="text-[10px] rounded bg-amber-200/70 px-1 font-mono">
@@ -405,7 +499,7 @@ export function MedicineReviewRow({
             ) : isCustomMode ? (
               <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 space-y-2">
                 <span className="text-xs font-semibold text-slate-800">
-                  Enter Custom Prescribed Drug Details:
+                  Enter Custom Prescribed Drug Details (excluded from automated shop plan):
                 </span>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <input
@@ -474,8 +568,11 @@ export function MedicineReviewRow({
       {/* ----------------- State B: CONFIRMED Alternatives Flow ----------------- */}
       {row.isConfirmed && (
         <div className="border-t border-slate-100 bg-slate-50/40 p-4 sm:p-5 space-y-4">
-          {/* NTI Strict Safety Banner */}
-          {row.is_nti ? (
+          {row.is_custom || !hasValidCatalogUuid ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-100/80 p-3.5 text-xs text-slate-700">
+              <span className="font-semibold">Unlinked custom entry:</span> This medicine is not linked to a catalog UUID, so automated price comparison and pharmacy plan optimization are unavailable for it. Click &ldquo;Change&rdquo; to search the catalog if needed.
+            </div>
+          ) : row.is_nti ? (
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 shadow-xs">
               <div className="flex items-start gap-3">
                 <ShieldAlert className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
@@ -540,6 +637,13 @@ export function MedicineReviewRow({
                   <span className="font-bold text-slate-800 text-sm">
                     {row.mrp > 0 ? `₹${row.mrp.toFixed(2)}` : "Market Price"}
                   </span>
+                  {row.alternativesGroup?.selected_unit_price &&
+                    row.alternativesGroup?.selected_unit_label && (
+                      <div className="text-[11px] text-slate-500">
+                        ₹{row.alternativesGroup.selected_unit_price.toFixed(2)}{" "}
+                        {row.alternativesGroup.selected_unit_label}
+                      </div>
+                    )}
                 </div>
               </label>
 
@@ -584,6 +688,9 @@ export function MedicineReviewRow({
                                 <div className="text-xs text-slate-500">
                                   {janAlt.manufacturer || "PMBI Kendra"}
                                   {janAlt.pack_size ? ` • ${janAlt.pack_size}` : ""}
+                                  {janAlt.unit_price && janAlt.unit_label
+                                    ? ` (₹${janAlt.unit_price.toFixed(2)} ${janAlt.unit_label})`
+                                    : ""}
                                 </div>
                               </div>
                             </div>
@@ -639,6 +746,9 @@ export function MedicineReviewRow({
                                 <div className="text-xs text-slate-500">
                                   {alt.manufacturer || "Commercial Brand"}
                                   {alt.pack_size ? ` • ${alt.pack_size}` : ""}
+                                  {alt.unit_price && alt.unit_label
+                                    ? ` (₹${alt.unit_price.toFixed(2)} ${alt.unit_label})`
+                                    : ""}
                                 </div>
                               </div>
                             </div>
@@ -664,10 +774,9 @@ export function MedicineReviewRow({
               {(!row.alternativesGroup?.janAushadhiOptions ||
                 row.alternativesGroup.janAushadhiOptions.length === 0) &&
                 (!row.alternativesGroup?.lowerPriceAlternatives ||
-                  row.alternativesGroup.lowerPriceAlternatives.length === 0) &&
-                !row.is_custom && (
+                  row.alternativesGroup.lowerPriceAlternatives.length === 0) && (
                   <p className="text-xs text-slate-500 italic">
-                    No lower-cost same-salt alternatives found in catalog. Prescribed brand will be quoted across partner pharmacies.
+                    No lower-cost compatible same-salt alternatives found in catalog. Prescribed brand will be quoted across partner pharmacies.
                   </p>
                 )}
             </div>
