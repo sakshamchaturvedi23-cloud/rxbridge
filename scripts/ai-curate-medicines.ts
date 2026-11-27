@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { buildCanonicalCompositionKey } from "../src/lib/clinical/normalize";
+import { isNtiComposition, isScheduleHComposition } from "../src/lib/clinical/nti-list";
 
 const CSV_PATH = path.resolve("data/raw/A_Z_medicines_dataset_of_India.csv");
 const CACHE_PATH = path.resolve("data/ai-curated-scores.json");
@@ -43,11 +45,7 @@ function parseCsvLine(line: string): string[] {
 }
 
 function makeCompositionKey(c1: string, c2: string): string {
-  return [c1, c2]
-    .filter(Boolean)
-    .map((s) => s.toLowerCase().replace(/\s+/g, " ").trim())
-    .sort()
-    .join(" + ");
+  return buildCanonicalCompositionKey([c1, c2].filter(Boolean).join(" + "));
 }
 
 function buildCandidatePool(): RawCandidate[] {
@@ -233,8 +231,8 @@ async function main() {
       composition_key: r.compositionKey,
       mrp: r.mrp,
       is_jan_aushadhi: false,
-      is_nti: false,
-      is_schedule_h: false,
+      is_nti: isNtiComposition(r.compositionDisplay),
+      is_schedule_h: isScheduleHComposition(r.compositionDisplay),
       manually_verified: false,
     }));
 

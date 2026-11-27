@@ -151,3 +151,204 @@ export function extractSaltNames(compositionDisplay: string): string[] {
     })
     .filter((token) => token.length > 0);
 }
+
+/**
+ * Canonical composition key builder supporting both '+' and '|' delimiters and
+ * normalizing common Indian/British salt spelling variants (e.g. amoxycillin -> amoxicillin).
+ *
+ * Examples:
+ * - "Amoxycillin (500mg) + Clavulanic Acid (125mg)" -> "amoxicillin-500mg+clavulanic-acid-125mg"
+ * - "aceclofenac (100mg)|paracetamol (500mg)" -> "aceclofenac-100mg+paracetamol-500mg"
+ */
+export function buildCanonicalCompositionKey(compositionDisplay: string): string {
+  if (!compositionDisplay || typeof compositionDisplay !== "string") {
+    return "";
+  }
+
+  const rawTokens = compositionDisplay.split(/[+|]/);
+
+  const normalizedTokens = rawTokens
+    .map((rawToken) => {
+      let token = rawToken.replace(/[()]/g, " ");
+      token = token.replace(/\b(?:i\.?p\.?|b\.?p\.?|u\.?s\.?p\.?)\.?\s*$/i, "");
+      token = token.toLowerCase().replace(/\s+/g, " ").trim();
+      token = normalizeSaltSpelling(token);
+      token = token.replace(
+        /(\d+(?:\.\d+)?)\s*(mg|mcg|µg|ug|g|gm|ml|iu|%)(?![a-z])/g,
+        "$1$2"
+      );
+      token = token
+        .trim()
+        .replace(/\s+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      return token;
+    })
+    .filter((token) => token.length > 0);
+
+  normalizedTokens.sort((a, b) => a.localeCompare(b));
+  return normalizedTokens.join("+");
+}
+
+export type DosageForm =
+  | "oral_solid"
+  | "oral_liquid"
+  | "topical"
+  | "injectable"
+  | "inhaler"
+  | "ophthalmic_otic"
+  | "unknown";
+
+/**
+ * Classifies a medicine's dosage form from brand name, pack size, and composition text.
+ */
+export function detectDosageForm(
+  brandName: string,
+  packSize?: string | null,
+  compositionDisplay?: string | null
+): DosageForm {
+  const combined = `${brandName || ""} ${packSize || ""} ${compositionDisplay || ""}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!combined) return "unknown";
+
+  if (
+    /\b(eye\/ear|eye\s+drop|ear\s+drop|ophthalmic|otic|nasal\s+spray|nasal\s+drop|eye\s+ointment)\b/.test(
+      combined
+    )
+  ) {
+    return "ophthalmic_otic";
+  }
+
+  if (/\b(inhaler|rotacap|respule|transhaler|mdi|dpi|nebulizer|nebuliser)\b/.test(combined)) {
+    return "inhaler";
+  }
+
+  if (/\b(injection|inj\.?|vial|ampoule|infusion|pre-filled\s+syringe|syringe)\b/.test(combined)) {
+    return "injectable";
+  }
+
+  if (
+    /\b(cream|ointment|oint\.?|gel|lotion|tube\s+of|shampoo|dusting\s+powder|soap|local\s+application|l\/a|liniment)\b/.test(
+      combined
+    )
+  ) {
+    return "topical";
+  }
+
+  if (
+    /\b(syrup|syr\.?|suspension|susp\.?|dry\s+syrup|oral\s+solution|oral\s+suspension|oral\s+drops|drops|elixir)\b/.test(
+      combined
+    ) ||
+    /\bbottle\s+of\s+\d+(?:\.\d+)?\s*ml\b/.test(combined)
+  ) {
+    return "oral_liquid";
+  }
+
+  if (
+    /\b(tablet|tablets|tab\.?|capsule|capsules|cap\.?|strip\s+of|lozenge|sachet|dt|md)\b/.test(
+      combined
+    )
+  ) {
+    return "oral_solid";
+  }
+
+  return "unknown";
+}
+
+/**
+ * Determines whether two dosage forms are clinically compatible for generic/brand comparison.
+ * Returns true if either form is "unknown" (missing metadata) or both forms match.
+ */
+export function areDosageFormsCompatible(formA: DosageForm, formB: DosageForm): boolean {
+  if (formA === "unknown" || formB === "unknown") return true;
+  return formA === formB;
+}
+
+export interface ParsedPackSize {
+  count: number | null;
+  unit: "unit" | "ml" | "gm" | null;
+  raw: string | null;
+}
+
+/**
+ * Parses Indian medicine pack_size strings (e.g. "strip of 10 tablets", "bottle of 60 ml syrup",
+ * "tube of 15 gm cream") into numeric count and measurement unit.
+ */
+export function parsePackSize(packSize?: string | null): ParsedPackSize {
+  if (!packSize || typeof packSize !== "string") {
+    return { count: null, unit: null, raw: null };
+  }
+
+  const trimmed = packSize.trim();
+  if (!trimmed) return { count: null, unit: null, raw: null };
+
+  const mlMatch = trimmed.match(/(\d+(?:\.\d+)?)\s*ml\b/i);
+  if (mlMatch) {
+    const count = Number(mlMatch[1]);
+    return {
+      count: Number.isFinite(count) && count > 0 ? count : null,
+      unit: "ml",
+      raw: trimmed,
+    };
+  }
+
+  const gmMatch = trimmed.match(/(\d+(?:\.\d+)?)\s*(?:gm|g)\b/i);
+  if (gmMatch) {
+    const count = Number(gmMatch[1]);
+    return {
+      count: Number.isFinite(count) && count > 0 ? count : null,
+      unit: "gm",
+      raw: trimmed,
+    };
+  }
+
+  const unitMatch = trimmed.match(
+    /(\d+(?:\.\d+)?)\s*(?:tablets?|tabs?|capsules?|caps?|sachets?|vials?|ampoules?|rotacaps?|respules?|units?)\b/i
+  );
+  if (unitMatch) {
+    const count = Number(unitMatch[1]);
+    return {
+      count: Number.isFinite(count) && count > 0 ? count : null,
+      unit: "unit",
+      raw: trimmed,
+    };
+  }
+
+  const fallbackNum = trimmed.match(/^(\d+(?:\.\d+)?)$/);
+  if (fallbackNum) {
+    const count = Number(fallbackNum[1]);
+    return {
+      count: Number.isFinite(count) && count > 0 ? count : null,
+      unit: "unit",
+      raw: trimmed,
+    };
+  }
+
+  return { count: null, unit: null, raw: trimmed };
+}
+
+/**
+ * Calculates per-unit price (per tablet/capsule, per ml, or per gm) from pack MRP and pack_size.
+ */
+export function calculateUnitPrice(
+  mrp: number,
+  packSize?: string | null
+): { unitPrice: number | null; unitLabel: string | null; count: number | null } {
+  if (!Number.isFinite(mrp) || mrp <= 0) {
+    return { unitPrice: null, unitLabel: null, count: null };
+  }
+
+  const parsed = parsePackSize(packSize);
+  if (!parsed.count || !parsed.unit) {
+    return { unitPrice: null, unitLabel: null, count: null };
+  }
+
+  const unitPrice = Number((mrp / parsed.count).toFixed(2));
+  const unitLabel =
+    parsed.unit === "ml" ? "per ml" : parsed.unit === "gm" ? "per gm" : "per unit";
+
+  return { unitPrice, unitLabel, count: parsed.count };
+}
