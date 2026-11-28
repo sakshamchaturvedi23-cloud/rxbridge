@@ -172,6 +172,8 @@ export interface InventoryItemDTO {
   mrp: number | null;
   selling_price: number | null;
   discount_pct: number;
+  unit_price?: number | null;
+  unit_label?: string | null;
   quantity_on_hand: number;
   quantity_reserved: number;
   available_to_promise: number;
@@ -565,6 +567,10 @@ export const inventoryUpdateSchema = z
     is_available: z.boolean().optional(),
     is_archived: z.boolean().optional(),
     is_rx_required: z.boolean().optional(),
+    quantity_on_hand: z.number().int().min(0).optional(),
+    delta: z.number().int().optional(),
+    movement_type: z.enum(INVENTORY_MOVEMENT_TYPES).optional(),
+    reason: z.string().trim().max(300).optional(),
     custom_brand_name: z.string().trim().max(160).nullable().optional(),
     custom_generic_name: z.string().trim().max(160).nullable().optional(),
     custom_composition: z.string().trim().max(320).nullable().optional(),

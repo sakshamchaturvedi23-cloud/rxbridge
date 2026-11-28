@@ -7,7 +7,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getMedicineById, type MedicineSearchItem } from "@/lib/clinical/medicine-search";
-import { buildCompositionKey, detectDosageForm } from "@/lib/clinical/normalize";
+import { buildCompositionKey, calculateUnitPrice, detectDosageForm } from "@/lib/clinical/normalize";
 import { isNtiComposition, isScheduleHComposition } from "@/lib/clinical/nti-list";
 import type { Database } from "@/types/database.types";
 import type {
@@ -355,6 +355,13 @@ export function toInventoryItemDTO(
     isNti ||
     isScheduleHComposition(clinicalText);
 
+  const effectivePackSize = row.is_catalog_linked
+    ? medicine?.pack_size ?? null
+    : row.custom_pack_size;
+  const effectivePriceForUnit =
+    row.selling_price ?? row.mrp ?? medicine?.mrp ?? 0;
+  const unitInfo = calculateUnitPrice(effectivePriceForUnit, effectivePackSize);
+
   return {
     id: row.id,
     shop_id: row.shop_id,
@@ -368,7 +375,7 @@ export function toInventoryItemDTO(
     dosage_form: row.is_catalog_linked
       ? detectDosageForm(displayName, medicine?.pack_size, compDisplay)
       : row.custom_dosage_form || detectDosageForm(displayName, row.custom_pack_size, compDisplay),
-    pack_size: row.is_catalog_linked ? medicine?.pack_size ?? null : row.custom_pack_size,
+    pack_size: effectivePackSize,
     manufacturer: row.is_catalog_linked ? medicine?.manufacturer ?? null : row.custom_manufacturer,
     is_rx_required: row.is_rx_required || isScheduleH || isNti,
     is_nti: isNti,
@@ -377,6 +384,8 @@ export function toInventoryItemDTO(
     mrp: row.mrp ?? medicine?.mrp ?? null,
     selling_price: row.selling_price,
     discount_pct: row.discount_pct,
+    unit_price: unitInfo.unitPrice,
+    unit_label: unitInfo.unitLabel,
     quantity_on_hand: row.quantity_on_hand,
     quantity_reserved: row.quantity_reserved,
     available_to_promise: atp,
