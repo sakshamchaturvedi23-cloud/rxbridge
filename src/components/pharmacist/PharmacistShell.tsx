@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
-  Bell,
   Building2,
   ClipboardCheck,
   LayoutDashboard,
@@ -23,6 +22,7 @@ import type {
   PharmacistMemberRole,
   PharmacyShopSummary,
 } from "@/types/pharmacist";
+import { NotificationBell } from "./NotificationBell";
 import { VerificationBanner } from "./VerificationBanner";
 
 interface PharmacistPortalContextValue {
@@ -343,19 +343,10 @@ export function PharmacistShell({ children }: { children: React.ReactNode }) {
               <span className="hidden rounded-md border border-slate-800 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 sm:inline-block">
                 {ROLE_LABELS[memberRole]}
               </span>
-              <Link
-                href="/pharmacist/dashboard"
-                className="relative inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-800"
-                aria-label="Notifications"
-              >
-                <Bell className="h-4 w-4 text-slate-300" />
-                <span className="hidden sm:inline">Alerts</span>
-                {unreadNotifications > 0 && (
-                  <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[11px] font-semibold text-slate-950">
-                    {unreadNotifications}
-                  </span>
-                )}
-              </Link>
+              <NotificationBell
+                unreadCount={unreadNotifications}
+                onUnreadCountChange={setUnreadNotifications}
+              />
               <button
                 type="button"
                 onClick={handleSignOut}

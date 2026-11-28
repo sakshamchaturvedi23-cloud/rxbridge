@@ -76,3 +76,61 @@ export async function createPharmacistNotification(
     return { ok: false, error: msg };
   }
 }
+
+/**
+ * Emits a `low_stock` notification when available-to-promise falls at or below `minStockThreshold`.
+ */
+export async function notifyLowStockIfNeeded(params: {
+  shopId: string;
+  inventoryId: string;
+  displayName: string;
+  availableToPromise: number;
+  minStockThreshold: number;
+}): Promise<CreatePharmacistNotificationResult | null> {
+  if (params.availableToPromise > params.minStockThreshold) {
+    return null;
+  }
+  return createPharmacistNotification({
+    shopId: params.shopId,
+    eventType: "low_stock",
+    title:
+      params.availableToPromise <= 0
+        ? `Out of stock: ${params.displayName}`
+        : `Low stock alert: ${params.displayName}`,
+    body: `Available-to-promise is ${params.availableToPromise} (threshold ${params.minStockThreshold}).`,
+    entityType: "inventory",
+    entityId: params.inventoryId,
+  });
+}
+
+export async function notifyNewDemand(params: {
+  shopId: string;
+  requestId: string;
+  medicineName: string;
+  requestedQty: number;
+}): Promise<CreatePharmacistNotificationResult> {
+  return createPharmacistNotification({
+    shopId: params.shopId,
+    eventType: "new_demand",
+    title: `New patient demand: ${params.medicineName}`,
+    body: `Patient requested qty ${params.requestedQty}.`,
+    entityType: "demand",
+    entityId: params.requestId,
+  });
+}
+
+export async function notifyClarificationSubmitted(params: {
+  shopId: string;
+  entityType: "reservation" | "prescription";
+  entityId: string;
+  summary: string;
+}): Promise<CreatePharmacistNotificationResult> {
+  return createPharmacistNotification({
+    shopId: params.shopId,
+    eventType: "clarification_submitted",
+    title: "Clarification updated",
+    body: params.summary,
+    entityType: params.entityType,
+    entityId: params.entityId,
+  });
+}

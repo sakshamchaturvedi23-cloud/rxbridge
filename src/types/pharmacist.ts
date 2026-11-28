@@ -740,16 +740,36 @@ export type ReservationItemDecisionInput = z.infer<
 
 export const reservationTransitionSchema = z
   .object({
-    to_status: z.enum(FULFILMENT_STATUSES),
+    to_status: z.enum(FULFILMENT_STATUSES).optional(),
+    target_status: z.enum(FULFILMENT_STATUSES).optional(),
     reason: z.string().trim().max(600).nullable().optional(),
     pharmacist_note: z.string().trim().max(600).nullable().optional(),
     item_decisions: z.array(reservationItemDecisionSchema).optional(),
+    item_approvals: z
+      .array(
+        z.object({
+          reservation_item_id: uuidSchema,
+          inventory_id: uuidSchema.nullable().optional(),
+          approved_qty: z.number().int().min(0),
+          item_note: z.string().trim().max(300).nullable().optional(),
+        })
+      )
+      .optional(),
   })
   .superRefine((val, ctx) => {
+    const resolvedTarget = val.target_status ?? val.to_status;
+    if (!resolvedTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target_status"],
+        message: "target_status is required",
+      });
+      return;
+    }
     if (
-      val.to_status === "rejected" ||
-      val.to_status === "cancelled" ||
-      val.to_status === "awaiting_clarification"
+      resolvedTarget === "rejected" ||
+      resolvedTarget === "cancelled" ||
+      resolvedTarget === "awaiting_clarification"
     ) {
       const hasReason =
         Boolean(val.reason?.trim()) || Boolean(val.pharmacist_note?.trim());
@@ -757,7 +777,7 @@ export const reservationTransitionSchema = z
         ctx.addIssue({
           code: "custom",
           path: ["reason"],
-          message: `A non-empty reason is required when transitioning reservation to '${val.to_status}'`,
+          message: `A non-empty reason is required when transitioning reservation to '${resolvedTarget}'`,
         });
       }
     }
@@ -766,13 +786,44 @@ export type ReservationTransitionInput = z.infer<
   typeof reservationTransitionSchema
 >;
 
+export const patientCreateReservationSchema = z.object({
+  shop_id: uuidSchema,
+  prescription_id: uuidSchema.nullable().optional(),
+  plan_mode: z.enum([
+    "cheapest",
+    "nearest",
+    "generic_saver",
+    "fewest_stops",
+    "best_balanced",
+  ]),
+  items: z
+    .array(
+      z.object({
+        requested_medicine_id: uuidSchema,
+        allow_alternative: z.boolean(),
+        quantity: z.number().int().min(1).max(100).optional().default(1),
+      })
+    )
+    .min(1, "At least one medicine item is required")
+    .max(50, "Maximum 50 items per reservation"),
+});
+export type PatientCreateReservationInput = z.infer<
+  typeof patientCreateReservationSchema
+>;
+
 export const markNotificationReadSchema = z
   .object({
+    id: uuidSchema.optional(),
     notification_ids: z.array(uuidSchema).min(1).max(100).optional(),
     mark_all: z.boolean().optional(),
+    markAllRead: z.boolean().optional(),
   })
   .refine(
-    (val) => Boolean(val.mark_all) || (val.notification_ids?.length ?? 0) > 0,
-    { message: "Specify notification_ids or mark_all: true" }
+    (val) =>
+      Boolean(val.markAllRead) ||
+      Boolean(val.mark_all) ||
+      Boolean(val.id) ||
+      (val.notification_ids?.length ?? 0) > 0,
+    { message: "Specify id, notification_ids, or markAllRead: true" }
   );
 export type MarkNotificationReadInput = z.infer<typeof markNotificationReadSchema>;

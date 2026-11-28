@@ -15,6 +15,7 @@ import {
   prepareInventoryInsertPayload,
   toInventoryItemDTO,
 } from "@/lib/pharmacist/inventory-service";
+import { notifyLowStockIfNeeded } from "@/lib/pharmacist/notifications";
 import type { ContextResolver } from "@/lib/pharmacist/onboarding-handlers";
 import type { Database } from "@/types/database.types";
 import {
@@ -492,8 +493,20 @@ export async function handlePatchInventoryById(
     );
   }
 
+  const dto = mapRowToDto(updatedRow as InventoryRowWithMed);
+
+  if (stockDelta < 0 && !dto.is_archived) {
+    await notifyLowStockIfNeeded({
+      shopId: ctx.shopId,
+      inventoryId: dto.id,
+      displayName: dto.display_name,
+      availableToPromise: dto.available_to_promise,
+      minStockThreshold: dto.min_stock_threshold,
+    });
+  }
+
   return NextResponse.json({
-    item: mapRowToDto(updatedRow as InventoryRowWithMed),
+    item: dto,
   });
 }
 
