@@ -11,11 +11,12 @@
 ## 2. Folder & Shared Ownership (Zero Conflicts)
 - **P1 (Patient UI + Shared Shell Owner):**
   - Owns: `src/app/layout.tsx`, `src/components/shared/` (navbar, auth/login, badges), `src/app/(patient)/`, `src/components/patient/`
-- **P2 (AI Extraction, Clinical Rules & Data):**
-  - Owns: `src/app/api/extract/`, `src/app/api/safety/`, `src/app/api/search/`, `src/lib/clinical/`, `scripts/` (one-time Kaggle cleaning)
-- **P3 (Shops, Optimizer, Pharmacist Ops + DB Schema Owner):**
-  - Owns: `schema.sql` (migrations), `src/app/api/plans/`, `src/app/api/reservations/`, `src/app/(pharmacist)/`, `src/components/pharmacist/`, `src/lib/optimizer/`
-  - **Schema Rule:** Only P3 modifies `schema.sql`, runs migrations in Supabase, regenerates `src/types/database.types.ts` (`npx supabase gen types typescript --remote=hjjnanwlcerxapeugama > src/types/database.types.ts`), and notifies P1 & P2 to pull.
+- **P2 (AI Extraction, Clinical Rules, Data & Complete Pharmacist Side Workflow):**
+  - Owns (AI & Clinical Foundation): `src/app/api/extract/`, `src/app/api/safety/`, `src/app/api/search/`, `src/app/api/medicines/`, `src/lib/clinical/`, `scripts/` (one-time Kaggle cleaning)
+  - Owns (Pharmacist Side Workflow): `src/app/(pharmacist)/`, `src/components/pharmacist/`, `src/app/api/pharmacist/**`, `src/lib/pharmacist/**`, `src/types/pharmacist.ts`, pharmacist DB/RLS extensions, and `src/app/api/reservations/**` coordination
+- **P3 (Pharmacy Discovery & Optimization — Exclusive to P3):**
+  - Owns: `src/app/api/plans/`, `src/lib/optimizer/*` (pharmacy-plan generation, medicine allocation, split-cart logic, distance calculations, pharmacy map, and routing), and core non-pharmacist DB schema (`schema.sql`)
+  - **Schema Rule:** P3 owns core non-pharmacist schema in `schema.sql`, while P2 owns pharmacist DB/RLS extensions. After any Supabase migration, regenerate `src/types/database.types.ts` (`npx supabase gen types typescript --remote=hjjnanwlcerxapeugama > src/types/database.types.ts`) and notify teammates to pull.
 
 ## 3. Data & Clinical Guardrails
 - **Catalog Size:** 500–1,000 active Indian outpatient medicines (verify Kaggle dataset license). Manually verify at least 50 high-frequency entries.

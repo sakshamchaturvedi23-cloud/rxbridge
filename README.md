@@ -1,36 +1,51 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app) for **RxBridge**, a healthcare coordination platform connecting patients, pharmacies, and pharmacists.
 
 ## Getting Started
 
-First, run the development server:
+First, configure `.env.local` with the required environment variables (do not commit `.env.local`):
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY` (server-only — never expose to client components)
+- `VISION_LLM_API_KEY` (for live OCR in `/api/extract`)
+- `VISION_LLM_BASE_URL` (optional)
+- `VISION_LLM_MODEL` / `VISION_LLM_MODELS` (optional)
+
+Then run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Pharmacist Side Workflow
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The pharmacist portal lives under `/pharmacist/*`:
 
-## Learn More
+- `/pharmacist/login` — Pharmacist email/password sign-in
+- `/pharmacist/register` — Pharmacy onboarding (starts in `pending` verification status)
+- `/pharmacist/dashboard` — 7-section dashboard shell & 9 real-DB overview KPIs
+- `/pharmacist/inventory` — Catalog-linked & manual/unlinked inventory CRUD, batch/expiry tracking, atomic stock adjustments & movement ledger
+- `/pharmacist/demand` — Anonymized patient medicine demand feed (verified shops only)
+- `/pharmacist/prescriptions` & `/pharmacist/prescriptions/[id]` — Licensed pharmacist clinical review queue, 300s signed-URL prescription viewer, NTI/Schedule H safety checks & audit notes
+- `/pharmacist/reservations` — Reservation fulfilment state machine (`pending` -> `approved` / `partially_approved` -> `preparing` -> `ready_for_pickup` -> `fulfilled`) backed by atomic Postgres `FOR UPDATE` RPCs
+- `/pharmacist/profile` & `/pharmacist/settings` — Pharmacy profile management & team role roster (`owner`, `licensed_pharmacist`, `staff`)
 
-To learn more about Next.js, take a look at the following resources:
+See [PHARMACIST_MODULE_HANDOFF.md](./PHARMACIST_MODULE_HANDOFF.md) for full architecture, schema, RLS, RPC, and API documentation.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Running Tests & Verification
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+# Run all P2 clinical + pharmacist unit & integration tests
+npx tsx --test tests/pharmacist-*.test.ts tests/p2-*.test.ts
 
-## Deploy on Vercel
+# TypeScript typecheck
+npx tsc --noEmit
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# Lint
+npm run lint
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# Production build (Next.js 16)
+npm run build
+```

@@ -14,6 +14,80 @@ export type Database = {
   }
   public: {
     Tables: {
+      inventory_movements: {
+        Row: {
+          actor_id: string | null
+          created_at: string
+          delta_qty: number
+          id: string
+          inventory_id: string
+          medicine_id: string | null
+          movement_type: string
+          new_qty: number
+          previous_qty: number
+          reason: string | null
+          reservation_id: string | null
+          shop_id: string
+        }
+        Insert: {
+          actor_id?: string | null
+          created_at?: string
+          delta_qty: number
+          id?: string
+          inventory_id: string
+          medicine_id?: string | null
+          movement_type: string
+          new_qty: number
+          previous_qty: number
+          reason?: string | null
+          reservation_id?: string | null
+          shop_id: string
+        }
+        Update: {
+          actor_id?: string | null
+          created_at?: string
+          delta_qty?: number
+          id?: string
+          inventory_id?: string
+          medicine_id?: string | null
+          movement_type?: string
+          new_qty?: number
+          previous_qty?: number
+          reason?: string | null
+          reservation_id?: string | null
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_movements_inventory_id_fkey"
+            columns: ["inventory_id"]
+            isOneToOne: false
+            referencedRelation: "shop_inventory"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_medicine_id_fkey"
+            columns: ["medicine_id"]
+            isOneToOne: false
+            referencedRelation: "medicines"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_reservation_id_fkey"
+            columns: ["reservation_id"]
+            isOneToOne: false
+            referencedRelation: "reservations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       medicines: {
         Row: {
           brand_name: string
@@ -135,6 +209,336 @@ export type Database = {
           },
         ]
       }
+      pharmacist_notifications: {
+        Row: {
+          body: string
+          created_at: string
+          entity_id: string | null
+          entity_type: string | null
+          event_type: string
+          id: string
+          is_read: boolean
+          read_at: string | null
+          recipient_user_id: string | null
+          shop_id: string
+          title: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string | null
+          event_type: string
+          id?: string
+          is_read?: boolean
+          read_at?: string | null
+          recipient_user_id?: string | null
+          shop_id: string
+          title: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string | null
+          event_type?: string
+          id?: string
+          is_read?: boolean
+          read_at?: string | null
+          recipient_user_id?: string | null
+          shop_id?: string
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pharmacist_notifications_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pharmacist_verification_notes: {
+        Row: {
+          author_id: string | null
+          created_at: string
+          decision_snapshot: string
+          id: string
+          note: string
+          prescription_id: string
+          shop_id: string
+          verification_id: string
+        }
+        Insert: {
+          author_id?: string | null
+          created_at?: string
+          decision_snapshot: string
+          id?: string
+          note: string
+          prescription_id: string
+          shop_id: string
+          verification_id: string
+        }
+        Update: {
+          author_id?: string | null
+          created_at?: string
+          decision_snapshot?: string
+          id?: string
+          note?: string
+          prescription_id?: string
+          shop_id?: string
+          verification_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pharmacist_verification_notes_prescription_id_fkey"
+            columns: ["prescription_id"]
+            isOneToOne: false
+            referencedRelation: "prescriptions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pharmacist_verification_notes_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pharmacist_verification_notes_verification_id_fkey"
+            columns: ["verification_id"]
+            isOneToOne: false
+            referencedRelation: "prescription_verifications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pharmacy_demand_responses: {
+        Row: {
+          availability_status: string
+          available_qty: number
+          created_at: string
+          id: string
+          note: string | null
+          quoted_unit_price: number | null
+          request_id: string
+          responded_by: string | null
+          shop_id: string
+          updated_at: string
+        }
+        Insert: {
+          availability_status: string
+          available_qty?: number
+          created_at?: string
+          id?: string
+          note?: string | null
+          quoted_unit_price?: number | null
+          request_id: string
+          responded_by?: string | null
+          shop_id: string
+          updated_at?: string
+        }
+        Update: {
+          availability_status?: string
+          available_qty?: number
+          created_at?: string
+          id?: string
+          note?: string | null
+          quoted_unit_price?: number | null
+          request_id?: string
+          responded_by?: string | null
+          shop_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pharmacy_demand_responses_request_id_fkey"
+            columns: ["request_id"]
+            isOneToOne: false
+            referencedRelation: "pharmacy_medicine_requests"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pharmacy_demand_responses_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pharmacy_medicine_requests: {
+        Row: {
+          active_ingredients: string | null
+          created_at: string
+          dosage_form: string | null
+          id: string
+          latitude: number | null
+          longitude: number | null
+          medicine_id: string | null
+          medicine_name: string
+          patient_id: string | null
+          requested_qty: number
+          service_area: string | null
+          status: string
+          strength: string | null
+          target_shop_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          active_ingredients?: string | null
+          created_at?: string
+          dosage_form?: string | null
+          id?: string
+          latitude?: number | null
+          longitude?: number | null
+          medicine_id?: string | null
+          medicine_name: string
+          patient_id?: string | null
+          requested_qty?: number
+          service_area?: string | null
+          status?: string
+          strength?: string | null
+          target_shop_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active_ingredients?: string | null
+          created_at?: string
+          dosage_form?: string | null
+          id?: string
+          latitude?: number | null
+          longitude?: number | null
+          medicine_id?: string | null
+          medicine_name?: string
+          patient_id?: string | null
+          requested_qty?: number
+          service_area?: string | null
+          status?: string
+          strength?: string | null
+          target_shop_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pharmacy_medicine_requests_medicine_id_fkey"
+            columns: ["medicine_id"]
+            isOneToOne: false
+            referencedRelation: "medicines"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pharmacy_medicine_requests_target_shop_id_fkey"
+            columns: ["target_shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pharmacy_members: {
+        Row: {
+          created_at: string
+          id: string
+          is_active: boolean
+          member_role: string
+          shop_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          member_role: string
+          shop_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          member_role?: string
+          shop_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pharmacy_members_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      prescription_verifications: {
+        Row: {
+          created_at: string
+          decision_reason: string | null
+          id: string
+          item_decisions: Json
+          prescription_id: string
+          reservation_id: string | null
+          shop_id: string
+          status: string
+          updated_at: string
+          verified_at: string | null
+          verified_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          decision_reason?: string | null
+          id?: string
+          item_decisions?: Json
+          prescription_id: string
+          reservation_id?: string | null
+          shop_id: string
+          status?: string
+          updated_at?: string
+          verified_at?: string | null
+          verified_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          decision_reason?: string | null
+          id?: string
+          item_decisions?: Json
+          prescription_id?: string
+          reservation_id?: string | null
+          shop_id?: string
+          status?: string
+          updated_at?: string
+          verified_at?: string | null
+          verified_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "prescription_verifications_prescription_id_fkey"
+            columns: ["prescription_id"]
+            isOneToOne: false
+            referencedRelation: "prescriptions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prescription_verifications_reservation_id_fkey"
+            columns: ["reservation_id"]
+            isOneToOne: false
+            referencedRelation: "reservations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "prescription_verifications_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       prescriptions: {
         Row: {
           confirmed_by_patient: boolean
@@ -213,40 +617,73 @@ export type Database = {
           role?: string
           trust_label?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "profiles_assigned_shop_id_fkey"
+            columns: ["assigned_shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       reservation_items: {
         Row: {
           allow_alternative: boolean
+          approved_qty: number
           final_price: number | null
           id: string
+          inventory_id: string | null
+          item_note: string | null
           item_status: string
           requested_medicine_id: string
+          requested_qty: number
           reservation_id: string
+          stock_deducted: boolean
+          stock_reserved_qty: number
           suggested_medicine_id: string | null
           updated_at: string | null
         }
         Insert: {
           allow_alternative?: boolean
+          approved_qty?: number
           final_price?: number | null
           id?: string
+          inventory_id?: string | null
+          item_note?: string | null
           item_status?: string
           requested_medicine_id: string
+          requested_qty?: number
           reservation_id: string
+          stock_deducted?: boolean
+          stock_reserved_qty?: number
           suggested_medicine_id?: string | null
           updated_at?: string | null
         }
         Update: {
           allow_alternative?: boolean
+          approved_qty?: number
           final_price?: number | null
           id?: string
+          inventory_id?: string | null
+          item_note?: string | null
           item_status?: string
           requested_medicine_id?: string
+          requested_qty?: number
           reservation_id?: string
+          stock_deducted?: boolean
+          stock_reserved_qty?: number
           suggested_medicine_id?: string | null
           updated_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "reservation_items_inventory_id_fkey"
+            columns: ["inventory_id"]
+            isOneToOne: false
+            referencedRelation: "shop_inventory"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "reservation_items_requested_medicine_id_fkey"
             columns: ["requested_medicine_id"]
@@ -270,10 +707,63 @@ export type Database = {
           },
         ]
       }
+      reservation_status_history: {
+        Row: {
+          actor_id: string | null
+          actor_role: string | null
+          created_at: string
+          from_status: string | null
+          id: string
+          reason: string | null
+          reservation_id: string
+          shop_id: string
+          to_status: string
+        }
+        Insert: {
+          actor_id?: string | null
+          actor_role?: string | null
+          created_at?: string
+          from_status?: string | null
+          id?: string
+          reason?: string | null
+          reservation_id: string
+          shop_id: string
+          to_status: string
+        }
+        Update: {
+          actor_id?: string | null
+          actor_role?: string | null
+          created_at?: string
+          from_status?: string | null
+          id?: string
+          reason?: string | null
+          reservation_id?: string
+          shop_id?: string
+          to_status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reservation_status_history_reservation_id_fkey"
+            columns: ["reservation_id"]
+            isOneToOne: false
+            referencedRelation: "reservations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reservation_status_history_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       reservations: {
         Row: {
           created_at: string | null
           estimated_total: number
+          expires_at: string | null
+          fulfilment_status: string
           id: string
           order_status: string
           patient_id: string
@@ -281,12 +771,15 @@ export type Database = {
           plan_mode: string
           prescription_id: string | null
           shop_id: string
-          updated_at: string | null
+          status_reason: string | null
+          updated_at: string
           verification_status: string
         }
         Insert: {
           created_at?: string | null
           estimated_total?: number
+          expires_at?: string | null
+          fulfilment_status?: string
           id?: string
           order_status?: string
           patient_id: string
@@ -294,12 +787,15 @@ export type Database = {
           plan_mode: string
           prescription_id?: string | null
           shop_id: string
-          updated_at?: string | null
+          status_reason?: string | null
+          updated_at?: string
           verification_status?: string
         }
         Update: {
           created_at?: string | null
           estimated_total?: number
+          expires_at?: string | null
+          fulfilment_status?: string
           id?: string
           order_status?: string
           patient_id?: string
@@ -307,7 +803,8 @@ export type Database = {
           plan_mode?: string
           prescription_id?: string | null
           shop_id?: string
-          updated_at?: string | null
+          status_reason?: string | null
+          updated_at?: string
           verification_status?: string
         }
         Relationships: [
@@ -368,31 +865,88 @@ export type Database = {
       }
       shop_inventory: {
         Row: {
+          archived_at: string | null
+          batch_number: string | null
+          custom_brand_name: string | null
+          custom_composition: string | null
+          custom_dosage_form: string | null
+          custom_generic_name: string | null
+          custom_manufacturer: string | null
+          custom_pack_size: string | null
+          custom_strength: string | null
           discount_pct: number
+          expiry_date: string | null
           id: string
           in_stock: boolean
-          medicine_id: string
+          is_archived: boolean
+          is_available: boolean
+          is_catalog_linked: boolean
+          is_rx_required: boolean
+          medicine_id: string | null
+          min_stock_threshold: number
+          mrp: number | null
+          quantity_on_hand: number
+          quantity_reserved: number
+          selling_price: number | null
           shop_id: string
           stock_source: string
-          updated_at: string | null
+          updated_at: string
         }
         Insert: {
+          archived_at?: string | null
+          batch_number?: string | null
+          custom_brand_name?: string | null
+          custom_composition?: string | null
+          custom_dosage_form?: string | null
+          custom_generic_name?: string | null
+          custom_manufacturer?: string | null
+          custom_pack_size?: string | null
+          custom_strength?: string | null
           discount_pct?: number
+          expiry_date?: string | null
           id?: string
           in_stock?: boolean
-          medicine_id: string
+          is_archived?: boolean
+          is_available?: boolean
+          is_catalog_linked?: boolean
+          is_rx_required?: boolean
+          medicine_id?: string | null
+          min_stock_threshold?: number
+          mrp?: number | null
+          quantity_on_hand?: number
+          quantity_reserved?: number
+          selling_price?: number | null
           shop_id: string
           stock_source?: string
-          updated_at?: string | null
+          updated_at?: string
         }
         Update: {
+          archived_at?: string | null
+          batch_number?: string | null
+          custom_brand_name?: string | null
+          custom_composition?: string | null
+          custom_dosage_form?: string | null
+          custom_generic_name?: string | null
+          custom_manufacturer?: string | null
+          custom_pack_size?: string | null
+          custom_strength?: string | null
           discount_pct?: number
+          expiry_date?: string | null
           id?: string
           in_stock?: boolean
-          medicine_id?: string
+          is_archived?: boolean
+          is_available?: boolean
+          is_catalog_linked?: boolean
+          is_rx_required?: boolean
+          medicine_id?: string | null
+          min_stock_threshold?: number
+          mrp?: number | null
+          quantity_on_hand?: number
+          quantity_reserved?: number
+          selling_price?: number | null
           shop_id?: string
           stock_source?: string
-          updated_at?: string | null
+          updated_at?: string
         }
         Relationships: [
           {
@@ -416,43 +970,73 @@ export type Database = {
           address: string
           archetype: string
           confirmed_requests: number
+          contact_email: string | null
+          contact_phone: string | null
           created_at: string | null
           default_discount_pct: number
           id: string
           lat: number
+          license_number: string | null
           lng: number
           name: string
+          operating_hours: Json | null
+          owner_id: string | null
+          pharmacist_reg_number: string | null
           reliability_score: number
+          service_radius_km: number | null
           shop_type: string
           total_requests: number
+          updated_at: string
+          verification_note: string | null
+          verification_status: string
         }
         Insert: {
           address: string
           archetype: string
           confirmed_requests?: number
+          contact_email?: string | null
+          contact_phone?: string | null
           created_at?: string | null
           default_discount_pct?: number
           id?: string
           lat: number
+          license_number?: string | null
           lng: number
           name: string
+          operating_hours?: Json | null
+          owner_id?: string | null
+          pharmacist_reg_number?: string | null
           reliability_score?: number
+          service_radius_km?: number | null
           shop_type: string
           total_requests?: number
+          updated_at?: string
+          verification_note?: string | null
+          verification_status?: string
         }
         Update: {
           address?: string
           archetype?: string
           confirmed_requests?: number
+          contact_email?: string | null
+          contact_phone?: string | null
           created_at?: string | null
           default_discount_pct?: number
           id?: string
           lat?: number
+          license_number?: string | null
           lng?: number
           name?: string
+          operating_hours?: Json | null
+          owner_id?: string | null
+          pharmacist_reg_number?: string | null
           reliability_score?: number
+          service_radius_km?: number | null
           shop_type?: string
           total_requests?: number
+          updated_at?: string
+          verification_note?: string | null
+          verification_status?: string
         }
         Relationships: []
       }
@@ -461,7 +1045,66 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      adjust_shop_inventory: {
+        Args: {
+          p_delta: number
+          p_inventory_id: string
+          p_movement_type: string
+          p_reason?: string
+          p_reservation_id?: string
+        }
+        Returns: {
+          archived_at: string | null
+          batch_number: string | null
+          custom_brand_name: string | null
+          custom_composition: string | null
+          custom_dosage_form: string | null
+          custom_generic_name: string | null
+          custom_manufacturer: string | null
+          custom_pack_size: string | null
+          custom_strength: string | null
+          discount_pct: number
+          expiry_date: string | null
+          id: string
+          in_stock: boolean
+          is_archived: boolean
+          is_available: boolean
+          is_catalog_linked: boolean
+          is_rx_required: boolean
+          medicine_id: string | null
+          min_stock_threshold: number
+          mrp: number | null
+          quantity_on_hand: number
+          quantity_reserved: number
+          selling_price: number | null
+          shop_id: string
+          stock_source: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shop_inventory"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      fulfill_reservation_stock: {
+        Args: { p_reservation_id: string }
+        Returns: Json
+      }
       get_my_shop_id: { Args: never; Returns: string }
+      is_shop_member: {
+        Args: { p_roles?: string[]; p_shop_id: string }
+        Returns: boolean
+      }
+      release_reservation_stock: {
+        Args: { p_reason?: string; p_reservation_id: string }
+        Returns: Json
+      }
+      reserve_reservation_stock: {
+        Args: { p_item_approvals?: Json; p_reservation_id: string }
+        Returns: Json
+      }
     }
     Enums: {
       [_ in never]: never
