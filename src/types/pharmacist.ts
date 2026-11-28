@@ -204,6 +204,14 @@ export interface InventoryMovementDTO {
   created_at: string;
 }
 
+export interface DemandStockMatch {
+  inStock: boolean;
+  availableQty: number;
+  inventoryId: string | null;
+  unitPrice: number | null;
+  canFulfilFull: boolean;
+}
+
 /**
  * Privacy-safe patient demand request DTO for pharmacist views/APIs.
  * Intentionally excludes `patient_id` and any patient PII.
@@ -218,12 +226,12 @@ export interface DemandFeedItemDTO {
   dosage_form: string | null;
   requested_qty: number;
   service_area: string | null;
-  latitude: number | null;
-  longitude: number | null;
+  distance_km: number | null;
   status: DemandRequestStatus;
   created_at: string;
   updated_at: string;
   my_response: DemandResponseDTO | null;
+  stock_match: DemandStockMatch;
 }
 
 export interface DemandResponseDTO {
@@ -664,8 +672,50 @@ export const prescriptionVerificationDecisionSchema = z
       }
     }
   });
-export type PrescriptionVerificationDecisionInput = z.infer<
+export type PrescriptionVerifyDecisionInput = z.infer<
   typeof prescriptionVerificationDecisionSchema
+>;
+
+export const prescriptionVerifyItemInputSchema = z.object({
+  temp_id: z.string().trim().max(80).optional(),
+  medicine_id: uuidSchema.nullable().optional(),
+  medicine_name: trimmedNonEmpty("medicine_name", 160),
+  verified: z.boolean(),
+  clarification_needed: z.boolean().optional(),
+  allow_substitution: z.boolean().optional(),
+  suggested_medicine_id: uuidSchema.nullable().optional(),
+  suggested_brand_name: z.string().trim().max(160).nullable().optional(),
+  suggested_composition_display: z.string().trim().max(320).nullable().optional(),
+  suggested_strength: z.string().trim().max(80).nullable().optional(),
+  suggested_dosage_form: z.string().trim().max(80).nullable().optional(),
+  note: z.string().trim().max(400).nullable().optional(),
+});
+
+export const prescriptionVerifyActionSchema = z
+  .object({
+    decision: z.enum([
+      "approved",
+      "rejected",
+      "needs_clarification",
+      "partially_verified",
+    ]),
+    note: z.string().trim().max(600).nullable().optional(),
+    item_decisions: z.array(prescriptionVerifyItemInputSchema).optional().default([]),
+  })
+  .superRefine((val, ctx) => {
+    if (
+      (val.decision === "rejected" || val.decision === "needs_clarification") &&
+      !val.note?.trim()
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["note"],
+        message: `A non-empty note is required when decision is '${val.decision}'`,
+      });
+    }
+  });
+export type PrescriptionVerifyActionInput = z.infer<
+  typeof prescriptionVerifyActionSchema
 >;
 
 export const reservationItemDecisionSchema = z.object({

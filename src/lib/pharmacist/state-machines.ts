@@ -11,6 +11,7 @@ import {
   buildCanonicalCompositionKey,
   detectDosageForm,
 } from "@/lib/clinical/normalize";
+import type { VerificationStatus } from "@/types/contracts";
 import type {
   FulfilmentStatus,
   LegacyOrderStatus,
@@ -176,6 +177,26 @@ export const CLINICAL_SIGN_OFF_ROLES: readonly PharmacistMemberRole[] = [
   "owner",
   "licensed_pharmacist",
 ];
+
+/**
+ * Maps Phase 6 verification status to legacy `reservations.verification_status`
+ * (`pending | verified | original_required | rejected`).
+ */
+export function mapVerificationToLegacyStatus(
+  status: PrescriptionVerificationStatus
+): VerificationStatus {
+  switch (status) {
+    case "pending_review":
+      return "pending";
+    case "approved":
+    case "partially_verified":
+      return "verified";
+    case "needs_clarification":
+      return "original_required";
+    case "rejected":
+      return "rejected";
+  }
+}
 
 export function canRoleSignOffVerification(
   role: PharmacistMemberRole
@@ -372,4 +393,14 @@ export function assertVerificationItemClinicalIntegrity(
       );
     }
   }
+}
+
+/**
+ * Explicit alias for NTI Do-Not-Substitute + identity integrity enforcement.
+ */
+export function assertNoNtiSubstitution(
+  prescribed: PrescribedItemSnapshot,
+  proposed: ProposedItemVerification
+): void {
+  assertVerificationItemClinicalIntegrity(prescribed, proposed);
 }
