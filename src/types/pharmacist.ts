@@ -351,6 +351,34 @@ export interface PharmacistDashboardKPIs {
   fulfilled_today_count: number;
 }
 
+export interface PharmacistOverviewKPIs {
+  totalMedicinesListed: number;
+  totalAvailableItems: number;
+  lowStockMedicines: number;
+  outOfStockMedicines: number;
+  incomingPatientRequests: number;
+  pendingPrescriptionVerifications: number;
+  approvedReservations: number;
+  rejectedRequests: number;
+  completedFulfilments: number;
+}
+
+export interface LowStockAlertItem {
+  id: string;
+  displayName: string;
+  availableToPromise: number;
+  minStockThreshold: number;
+  status: InventoryStatus;
+}
+
+export interface PharmacistDashboardResponse {
+  shop: PharmacyShopSummary;
+  memberRole: PharmacistMemberRole;
+  kpis: PharmacistOverviewKPIs;
+  unreadNotifications: number;
+  lowStockAlerts: LowStockAlertItem[];
+}
+
 // ---------------------------------------------------------------------------
 // Zod Validation Schemas
 // ---------------------------------------------------------------------------
@@ -363,6 +391,17 @@ const trimmedNonEmpty = (label: string, max = 500) =>
     .min(1, `${label} is required`)
     .max(max, `${label} must be at most ${max} characters`);
 
+const operatingHoursDaySchema = z.object({
+  open: z.string().regex(/^\d{2}:\d{2}$/, "Time must be HH:MM").optional(),
+  close: z.string().regex(/^\d{2}:\d{2}$/, "Time must be HH:MM").optional(),
+  closed: z.boolean().optional(),
+});
+
+export const operatingHoursSchema = z
+  .record(z.string(), z.union([operatingHoursDaySchema, z.string(), z.boolean(), z.null()]))
+  .optional()
+  .default({});
+
 export const shopOnboardingSchema = z.object({
   name: trimmedNonEmpty("Pharmacy name", 160),
   shop_type: z.enum(["chemist", "jan_aushadhi"]).default("chemist"),
@@ -370,16 +409,70 @@ export const shopOnboardingSchema = z.object({
     .enum(["neighborhood", "chain", "wholesale", "jan_aushadhi"])
     .default("neighborhood"),
   address: trimmedNonEmpty("Address", 320),
-  lat: z.number().min(-90).max(90),
-  lng: z.number().min(-180).max(180),
+  lat: z.number().min(-90, "Latitude must be >= -90").max(90, "Latitude must be <= 90"),
+  lng: z.number().min(-180, "Longitude must be >= -180").max(180, "Longitude must be <= 180"),
   license_number: trimmedNonEmpty("Drug license number", 80),
   pharmacist_reg_number: trimmedNonEmpty("Pharmacist registration number", 80),
   contact_phone: trimmedNonEmpty("Contact phone", 30),
   contact_email: z.string().trim().email("Valid contact email is required").max(160),
-  operating_hours: z.record(z.string(), z.unknown()).optional().default({}),
+  operating_hours: operatingHoursSchema,
   service_radius_km: z.number().positive("Service radius must be > 0").max(100).default(5),
 });
 export type ShopOnboardingInput = z.infer<typeof shopOnboardingSchema>;
+
+export const pharmacistRegisterRequestSchema = z
+  .object({
+    full_name: z.string().trim().min(2, "Full name is required").max(120).optional(),
+    email: z.string().trim().email("Valid account email is required").max(160).optional(),
+    password: z
+      .string()
+      .min(8, "Password must be at least 8 characters")
+      .max(128)
+      .optional(),
+    name: trimmedNonEmpty("Pharmacy name", 160),
+    shop_type: z.enum(["chemist", "jan_aushadhi"]).default("chemist"),
+    archetype: z
+      .enum(["neighborhood", "chain", "wholesale", "jan_aushadhi"])
+      .default("neighborhood"),
+    address: trimmedNonEmpty("Address", 320),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
+    latitude: z.number().min(-90).max(90).optional(),
+    longitude: z.number().min(-180).max(180).optional(),
+    license_number: trimmedNonEmpty("Drug license number", 80),
+    pharmacist_reg_number: trimmedNonEmpty("Pharmacist registration number", 80),
+    contact_phone: trimmedNonEmpty("Contact phone", 30),
+    contact_email: z.string().trim().email("Valid contact email is required").max(160),
+    operating_hours: operatingHoursSchema,
+    service_radius_km: z.number().positive("Service radius must be > 0").max(100).default(5),
+  })
+  .superRefine((val, ctx) => {
+    const resolvedLat = val.lat ?? val.latitude;
+    const resolvedLng = val.lng ?? val.longitude;
+    if (resolvedLat === undefined || !Number.isFinite(resolvedLat)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["latitude"],
+        message: "Valid latitude is required",
+      });
+    }
+    if (resolvedLng === undefined || !Number.isFinite(resolvedLng)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["longitude"],
+        message: "Valid longitude is required",
+      });
+    }
+    const hasAnyCred = Boolean(val.email || val.password);
+    if (hasAnyCred && (!val.email || !val.password || !val.full_name)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["email"],
+        message: "full_name, email, and password are all required when creating a new account",
+      });
+    }
+  });
+export type PharmacistRegisterRequestInput = z.infer<typeof pharmacistRegisterRequestSchema>;
 
 export const shopSettingsUpdateSchema = shopOnboardingSchema.partial().refine(
   (data) => Object.keys(data).length > 0,
