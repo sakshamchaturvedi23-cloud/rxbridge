@@ -1050,10 +1050,43 @@ export type Database = {
           p_delta: number
           p_inventory_id: string
           p_movement_type: string
-          p_reason?: string | null
-          p_reservation_id?: string | null
+          p_reason?: string
+          p_reservation_id?: string
         }
-        Returns: Database["public"]["Tables"]["shop_inventory"]["Row"]
+        Returns: {
+          archived_at: string | null
+          batch_number: string | null
+          custom_brand_name: string | null
+          custom_composition: string | null
+          custom_dosage_form: string | null
+          custom_generic_name: string | null
+          custom_manufacturer: string | null
+          custom_pack_size: string | null
+          custom_strength: string | null
+          discount_pct: number
+          expiry_date: string | null
+          id: string
+          in_stock: boolean
+          is_archived: boolean
+          is_available: boolean
+          is_catalog_linked: boolean
+          is_rx_required: boolean
+          medicine_id: string | null
+          min_stock_threshold: number
+          mrp: number | null
+          quantity_on_hand: number
+          quantity_reserved: number
+          selling_price: number | null
+          shop_id: string
+          stock_source: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shop_inventory"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       fulfill_reservation_stock: {
         Args: { p_reservation_id: string }
@@ -1065,11 +1098,11 @@ export type Database = {
         Returns: boolean
       }
       release_reservation_stock: {
-        Args: { p_reason?: string | null; p_reservation_id: string }
+        Args: { p_reason?: string; p_reservation_id: string }
         Returns: Json
       }
       reserve_reservation_stock: {
-        Args: { p_item_approvals?: Json | null; p_reservation_id: string }
+        Args: { p_item_approvals?: Json; p_reservation_id: string }
         Returns: Json
       }
     }

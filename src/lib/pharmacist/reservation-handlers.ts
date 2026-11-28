@@ -876,7 +876,7 @@ export async function handleTransitionReservation(
       "release_reservation_stock",
       {
         p_reservation_id: reservation.id,
-        p_reason: reasonText,
+        p_reason: reasonText ?? undefined,
       }
     );
 
